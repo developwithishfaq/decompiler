@@ -1,0 +1,3 @@
+# Python deps for the Frida features. The GUI itself uses only the stdlib (tkinter).
+# Install with: pip install -r requirements.txt
+frida-tools

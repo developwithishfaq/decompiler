@@ -1,0 +1,26 @@
+# --- Secrets / signing material (NEVER commit) ---
+*.keystore
+*.jks
+apk_tool_gui.config.json
+
+# --- Build artifacts / test inputs ---
+*.apk
+*.apk.idsig
+*.idsig
+*.apk.cache/
+
+# --- Runtime-generated data ---
+scripts/                # Frida scripts are auto-seeded by the app on first run
+*.log
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# --- OS / editor ---
+Thumbs.db
+.DS_Store
+*.lnk
