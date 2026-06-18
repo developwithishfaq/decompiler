@@ -10,7 +10,8 @@ apk_tool_gui.config.json
 *.apk.cache/
 
 # --- Runtime-generated data ---
-scripts/                # Frida scripts are auto-seeded by the app on first run
+# Frida scripts are auto-seeded by the app on first run
+scripts/
 *.log
 
 # --- Python ---
