@@ -2142,6 +2142,16 @@ class App(tk.Tk):
         if r.run(sign_cmd) != 0:
             self.write("\n✗ Signing FAILED.\n"); self.set_status("Sign failed"); self._set_busy(False); return
 
+        # signing succeeded — the final signed APK is all we need; drop the
+        # intermediate build artifacts so the output folder isn't cluttered.
+        for tmp in (unsigned, aligned):
+            try:
+                if os.path.isfile(tmp):
+                    os.remove(tmp)
+                    self.write(f"Cleaned up intermediate: {os.path.basename(tmp)}\n")
+            except OSError as e:
+                self.write(f"(could not remove {os.path.basename(tmp)}: {e})\n")
+
         # 4) verify
         self.set_status("Verifying…")
         self.write("\n--- STEP 4/4: apksigner verify ---\n")
@@ -2717,7 +2727,7 @@ class App(tk.Tk):
         listwrap.columnconfigure(0, weight=1)
         listwrap.rowconfigure(0, weight=1)
 
-        self.pull_list = tk.Listbox(listwrap, height=8, activestyle="dotbox",
+        self.pull_list = tk.Listbox(listwrap, height=5, activestyle="dotbox",
                                     selectmode="extended")
         self.pull_list.grid(row=0, column=0, sticky="nsew")
         vsb = ttk.Scrollbar(listwrap, command=self.pull_list.yview)
@@ -2953,8 +2963,9 @@ class App(tk.Tk):
         logwrap.columnconfigure(0, weight=1)
         logwrap.rowconfigure(0, weight=1)
 
-        self.logcat_text = tk.Text(logwrap, wrap="none", bg="#0d1117", fg="#c9d1d9",
-                                   insertbackground="#c9d1d9", font=("Consolas", 9))
+        self.logcat_text = tk.Text(logwrap, height=10, wrap="none", bg="#0d1117",
+                                   fg="#c9d1d9", insertbackground="#c9d1d9",
+                                   font=("Consolas", 9))
         self.logcat_text.grid(row=0, column=0, sticky="nsew")
 
         vsb = ttk.Scrollbar(logwrap, command=self.logcat_text.yview)
