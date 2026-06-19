@@ -815,6 +815,95 @@ Java.perform(function () {
                 'verification is doing its job.');
 });
 """,
+    "disable-ads.js": r"""// disable-ads.js — block common ad SDKs (for testing your own apps' ad-free /
+// premium flows). Best effort across the major networks; each hook is guarded,
+// so missing SDKs are simply skipped.
+//
+// Approach: no-op the load/show methods and make "is ready" checks return false.
+// Returns a type-correct default so it won't crash non-void methods.
+
+Java.perform(function () {
+    function block(className, methodName) {
+        try {
+            var C = Java.use(className);
+            if (!C[methodName]) return;
+            C[methodName].overloads.forEach(function (ov) {
+                var rt = ov.returnType.className;
+                ov.implementation = function () {
+                    console.log('[ads] blocked ' + className.split('.').pop() + '.' + methodName);
+                    switch (rt) {
+                        case 'void':    return;
+                        case 'boolean': return false;
+                        case 'int': case 'long': case 'short': case 'byte': return 0;
+                        case 'float': case 'double': return 0;
+                        default:        return null;
+                    }
+                };
+            });
+        } catch (e) {}
+    }
+
+    // Google Mobile Ads / AdMob
+    block('com.google.android.gms.ads.BaseAdView', 'loadAd');
+    block('com.google.android.gms.ads.interstitial.InterstitialAd', 'load');
+    block('com.google.android.gms.ads.interstitial.InterstitialAd', 'show');
+    block('com.google.android.gms.ads.rewarded.RewardedAd', 'load');
+    block('com.google.android.gms.ads.rewarded.RewardedAd', 'show');
+    block('com.google.android.gms.ads.rewardedinterstitial.RewardedInterstitialAd', 'load');
+    block('com.google.android.gms.ads.rewardedinterstitial.RewardedInterstitialAd', 'show');
+    block('com.google.android.gms.ads.appopen.AppOpenAd', 'load');
+    block('com.google.android.gms.ads.appopen.AppOpenAd', 'show');
+
+    // AppLovin MAX
+    block('com.applovin.mediation.ads.MaxAdView', 'loadAd');
+    block('com.applovin.mediation.ads.MaxInterstitialAd', 'loadAd');
+    block('com.applovin.mediation.ads.MaxInterstitialAd', 'showAd');
+    block('com.applovin.mediation.ads.MaxInterstitialAd', 'isReady');
+    block('com.applovin.mediation.ads.MaxRewardedAd', 'loadAd');
+    block('com.applovin.mediation.ads.MaxRewardedAd', 'showAd');
+    block('com.applovin.mediation.ads.MaxRewardedAd', 'isReady');
+    block('com.applovin.mediation.ads.MaxAppOpenAd', 'loadAd');
+    block('com.applovin.mediation.ads.MaxAppOpenAd', 'showAd');
+
+    // Unity Ads
+    block('com.unity3d.ads.UnityAds', 'load');
+    block('com.unity3d.ads.UnityAds', 'show');
+    block('com.unity3d.ads.UnityAds', 'isReady');
+
+    // IronSource / LevelPlay
+    block('com.ironsource.mediationsdk.IronSource', 'loadInterstitial');
+    block('com.ironsource.mediationsdk.IronSource', 'showInterstitial');
+    block('com.ironsource.mediationsdk.IronSource', 'showRewardedVideo');
+    block('com.ironsource.mediationsdk.IronSource', 'loadBanner');
+    block('com.ironsource.mediationsdk.IronSource', 'isInterstitialReady');
+    block('com.ironsource.mediationsdk.IronSource', 'isRewardedVideoAvailable');
+
+    // Meta / Facebook Audience Network
+    block('com.facebook.ads.InterstitialAd', 'loadAd');
+    block('com.facebook.ads.InterstitialAd', 'show');
+    block('com.facebook.ads.RewardedVideoAd', 'loadAd');
+    block('com.facebook.ads.RewardedVideoAd', 'show');
+    block('com.facebook.ads.AdView', 'loadAd');
+
+    // Vungle / Liftoff
+    block('com.vungle.warren.Vungle', 'loadAd');
+    block('com.vungle.warren.Vungle', 'playAd');
+    block('com.vungle.warren.Vungle', 'canPlayAd');
+
+    // AdColony
+    block('com.adcolony.sdk.AdColony', 'requestInterstitial');
+    block('com.adcolony.sdk.AdColony', 'requestAdView');
+
+    // Chartboost
+    block('com.chartboost.sdk.Chartboost', 'showInterstitial');
+    block('com.chartboost.sdk.Chartboost', 'cacheInterstitial');
+    block('com.chartboost.sdk.Chartboost', 'showRewardedVideo');
+
+    console.log('[ads] ad-blocking hooks installed. Watch for "[ads] blocked ..." lines; ' +
+                'if none appear, the app may use a network not covered here (run ' +
+                'list-classes.js with the SDK package to identify it).');
+});
+""",
     "pref-spoof.js": r"""// pref-spoof.js — return fake values for chosen SharedPreferences keys.
 // The GUI injects an OVERRIDES array: [{key, type, value}, ...]
 // type is one of: string | boolean | int | long | float
