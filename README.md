@@ -66,6 +66,7 @@ regenerate it).
 | `[ui]` `title` / `geometry` / `min_width` / `min_height` | Window title and sizing |
 | `[adb]` `default_host` | Prefilled ADB device (host:port) |
 | `[adb]` `frida_remote` | Default on-device `frida-server` path |
+| `[adb]` `prefer` | Which adb to auto-pick first: `emulator` (Nox/BlueStacks/… — default, matches the emulator and avoids version conflicts) or `sdk` |
 | `[keystore]` `auto_detect_globs` | Patterns used to auto-fill the keystore field |
 | `[tools.path]` `<tool>` | **Exact full path** to a tool's binary — pin it explicitly (wins over everything); leave blank to auto-detect |
 | `[tools.names]` `<tool>` | Executable filenames searched for each tool when its path is blank |

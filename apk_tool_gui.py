@@ -72,6 +72,8 @@ DEFAULT_SETTINGS = {
         # A common emulator adb port (Nox); editable in the Frida/ADB tab too.
         "default_host": "127.0.0.1:62001",
         "frida_remote": "/data/local/tmp/frida-server",
+        # Which adb to auto-pick first: "emulator" (Nox/BlueStacks/…) or "sdk".
+        "prefer": "emulator",
     },
     "keystore": {
         # If exactly these patterns match a file next to the app, prefill it.
@@ -124,6 +126,10 @@ min_height = 380
 # Prefilled ADB device (host:port) and the on-device frida-server path.
 default_host = 127.0.0.1:62001
 frida_remote = /data/local/tmp/frida-server
+# Which adb to auto-pick first when several exist:
+#   emulator = an emulator's own adb (Nox / BlueStacks / LDPlayer / ...)   <- default
+#   sdk      = the Android SDK / PATH copy
+prefer = emulator
 
 [keystore]
 # Patterns used to auto-fill the keystore field from files next to the app.
@@ -214,7 +220,7 @@ def _load_settings():
                 pass
 
     # [adb]
-    for k in ("default_host", "frida_remote"):
+    for k in ("default_host", "frida_remote", "prefer"):
         v = gets("adb", k)
         if v:
             settings["adb"][k] = v
@@ -389,10 +395,26 @@ def _find_apksigner():
 
 
 def _find_adb():
+    """Find adb. By default an emulator's own adb (Nox / BlueStacks / …) is
+    preferred over the Android SDK / PATH copy, because its version matches the
+    emulator and avoids 'adb server version' conflicts. Set [adb] prefer = sdk
+    in settings.ini to flip the order."""
     names = _tool_names("adb")
-    return (_which(names)
-            or _find_in_dirs(_platform_tools_dirs(), names)
-            or _find_in_dirs(_emulator_dirs(), names))
+    from_emulator = lambda: _find_in_dirs(_emulator_dirs(), names)
+    from_path = lambda: _which(names)
+    from_sdk = lambda: _find_in_dirs(_platform_tools_dirs(), names)
+
+    prefer = str(SETTINGS["adb"].get("prefer", "emulator")).lower()
+    if prefer.startswith("emu"):
+        order = (from_emulator, from_path, from_sdk)
+    else:
+        order = (from_path, from_sdk, from_emulator)
+
+    for finder in order:
+        found = finder()
+        if found:
+            return found
+    return None
 
 
 def _find_frida_ps():
