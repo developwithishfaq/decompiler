@@ -54,34 +54,36 @@ without re-typing setup every day.
 
 ## Configuration
 
-All tunable defaults live in one hand-editable, committed file: **`settings.json`**
-(next to `apk_tool_gui.py`). Edit it to change behaviour — no code changes
-needed. Any missing or invalid key silently falls back to a built-in default,
-so you can keep only the keys you care about (or delete the file to regenerate
-it).
+All tunable defaults live in one hand-editable, committed file: **`settings.ini`**
+(next to `apk_tool_gui.py`). It's a plain INI file — edit it to change behaviour,
+no code changes needed. **Windows paths can be pasted exactly as-is** (no
+escaping, no slash-flipping). Any missing or invalid key silently falls back to
+a built-in default, so you can keep only what you change (or delete the file to
+regenerate it).
 
-| Key | What it controls |
+| Section / key | What it controls |
 |---|---|
-| `ui.title` / `ui.geometry` / `ui.min_width` / `ui.min_height` | Window title and sizing |
-| `adb.default_host` | Prefilled ADB device (host:port) |
-| `adb.frida_remote` | Default on-device `frida-server` path |
-| `keystore.auto_detect_globs` | Patterns used to auto-fill the keystore field |
-| `tools.<tool>.path` | **Exact full path** to a tool's binary — set this to pin it explicitly (wins over everything); leave `""` to auto-detect |
-| `tools.<tool>.names` | Executable filenames searched for each tool when `path` is `""` |
-| `search_paths.android_sdk_roots` | Extra Android SDK roots to scan |
-| `search_paths.build_tools_dirs` | Extra dirs holding `zipalign` / `apksigner` |
-| `search_paths.platform_tools_dirs` | Extra dirs holding `adb` |
-| `search_paths.emulator_dirs` | Extra emulator bin folders |
-| `search_paths.extra_tool_dirs` | Generic extra dirs searched for every tool |
+| `[ui]` `title` / `geometry` / `min_width` / `min_height` | Window title and sizing |
+| `[adb]` `default_host` | Prefilled ADB device (host:port) |
+| `[adb]` `frida_remote` | Default on-device `frida-server` path |
+| `[keystore]` `auto_detect_globs` | Patterns used to auto-fill the keystore field |
+| `[tools.path]` `<tool>` | **Exact full path** to a tool's binary — pin it explicitly (wins over everything); leave blank to auto-detect |
+| `[tools.names]` `<tool>` | Executable filenames searched for each tool when its path is blank |
+| `[search_paths]` `android_sdk_roots` | Extra Android SDK roots to scan |
+| `[search_paths]` `build_tools_dirs` | Extra dirs holding `zipalign` / `apksigner` |
+| `[search_paths]` `platform_tools_dirs` | Extra dirs holding `adb` |
+| `[search_paths]` `emulator_dirs` | Extra emulator bin folders |
+| `[search_paths]` `extra_tool_dirs` | Generic extra dirs searched for every tool |
 
-**Example — pin adb to your emulator's binary.** In JSON, Windows paths need
-either forward slashes or escaped backslashes:
+**Example — pin adb to your emulator's binary.** Just paste the path:
 
-```json
-"tools": {
-  "adb": { "path": "D:/Program Files/Nox/bin/adb.exe", "names": ["adb.exe", "nox_adb.exe", "adb"] }
-}
+```ini
+[tools.path]
+adb = D:\Program Files\Nox\bin\adb.exe
 ```
+
+Lists (`names`, `search_paths`, `auto_detect_globs`) can be comma-separated or
+one item per line.
 
 The app also keeps two **machine-specific, git-ignored** files it manages for
 you (no need to edit by hand):

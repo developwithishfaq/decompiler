@@ -18,11 +18,13 @@ import os
 import sys
 import glob
 import json
+import copy
 import time
 import shutil
 import tempfile
 import threading
 import subprocess
+import configparser
 import queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -42,17 +44,22 @@ SCRIPTS_DIR = os.path.join(APP_DIR, "scripts")
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 # ---------------------------------------------------------------------------
-# Editable project settings (settings.json)
+# Editable project settings (settings.ini)
 #
 # Everything a user might reasonably want to tune — window size, the default
-# adb host, the executable names we look for, and any extra folders to search
-# for tools — lives in settings.json next to this script. It's plain JSON,
-# committed to the repo, and safe to hand-edit. Missing/invalid keys silently
-# fall back to the built-in defaults below, so you can delete the file or keep
-# only the keys you care about.
+# adb host, the executable names we look for, exact tool paths, and any extra
+# folders to search — lives in settings.ini next to this script. It's a plain
+# INI file, committed to the repo, and friendly to hand-edit. Crucially, you
+# can paste a Windows path exactly as-is (no backslash escaping):
+#
+#     [tools.path]
+#     adb = D:\Program Files\Nox\bin\adb.exe
+#
+# Any missing/invalid key silently falls back to the built-in defaults below,
+# so you can delete the file (it regenerates) or keep only what you change.
 # ---------------------------------------------------------------------------
 
-SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+SETTINGS_PATH = os.path.join(APP_DIR, "settings.ini")
 
 DEFAULT_SETTINGS = {
     "ui": {
@@ -71,9 +78,8 @@ DEFAULT_SETTINGS = {
         "auto_detect_globs": ["*.keystore", "*.jks"],
     },
     # Per tool:
-    #   "path"  - the exact full path to the binary. Set this to pin a tool
-    #             explicitly (e.g. "D:/Program Files/Nox/bin/adb.exe"); leave
-    #             "" to auto-detect. An explicit path always wins.
+    #   "path"  - the exact full path to the binary; pin a tool explicitly.
+    #             Leave empty to auto-detect. An explicit path always wins.
     #   "names" - the executable filenames to look for on PATH / search dirs
     #             when "path" is empty.
     "tools": {
@@ -96,36 +102,145 @@ DEFAULT_SETTINGS = {
     },
 }
 
+# Written verbatim if settings.ini is missing, so users get a documented file.
+SETTINGS_TEMPLATE = r"""# ===========================================================================
+# APK Tool GUI - settings
+#
+# Plain text. Edit freely; lines starting with #  are comments.
+# Paste Windows paths EXACTLY as they are - no escaping, no doubling slashes:
+#       adb = D:\Program Files\Nox\bin\adb.exe
+# Leave a value blank to fall back to automatic detection.
+# Lists may be comma-separated or one item per line.
+# Delete this file to regenerate it with defaults.
+# ===========================================================================
 
-def _deep_merge(base, override):
-    """Recursively overlay `override` onto a copy of `base`."""
-    out = dict(base)
-    for k, v in (override or {}).items():
-        if isinstance(v, dict) and isinstance(out.get(k), dict):
-            out[k] = _deep_merge(out[k], v)
-        else:
-            out[k] = v
-    return out
+[ui]
+title = APK Tool GUI
+geometry = 820x480
+min_width = 700
+min_height = 380
+
+[adb]
+# Prefilled ADB device (host:port) and the on-device frida-server path.
+default_host = 127.0.0.1:62001
+frida_remote = /data/local/tmp/frida-server
+
+[keystore]
+# Patterns used to auto-fill the keystore field from files next to the app.
+auto_detect_globs = *.keystore, *.jks
+
+# ---------------------------------------------------------------------------
+# Pin a tool to an EXACT binary. Paste the full path as-is. Example:
+#       adb = D:\Program Files\Nox\bin\adb.exe
+# Leave blank to auto-detect (PATH -> Android SDK -> emulator installs).
+# ---------------------------------------------------------------------------
+[tools.path]
+apktool =
+zipalign =
+apksigner =
+adb =
+frida_ps =
+frida =
+
+# ---------------------------------------------------------------------------
+# Executable filenames to look for when the path above is blank.
+# ---------------------------------------------------------------------------
+[tools.names]
+apktool = apktool.bat, apktool, apktool.jar
+zipalign = zipalign.exe, zipalign
+apksigner = apksigner.bat, apksigner, apksigner.jar
+adb = adb.exe, nox_adb.exe, adb
+frida_ps = frida-ps.exe, frida-ps
+frida = frida.exe, frida
+
+# ---------------------------------------------------------------------------
+# Extra folders to search, on top of auto-detection.
+# One folder per line or comma-separated. Paste as-is.
+# ---------------------------------------------------------------------------
+[search_paths]
+android_sdk_roots =
+build_tools_dirs =
+platform_tools_dirs =
+emulator_dirs =
+extra_tool_dirs =
+"""
+
+
+def _split_list(raw):
+    """Parse an INI value into a list: split on newlines and commas, trim."""
+    if not raw:
+        return []
+    items = []
+    for chunk in raw.replace(",", "\n").splitlines():
+        s = chunk.strip()
+        if s:
+            items.append(s)
+    return items
 
 
 def _load_settings():
-    """Built-in defaults overlaid with settings.json (creating it if absent)."""
-    user = {}
-    try:
-        with open(SETTINGS_PATH, encoding="utf-8") as fh:
-            loaded = json.load(fh)
-        if isinstance(loaded, dict):
-            user = loaded
-    except FileNotFoundError:
-        # Seed a starter file so users have something concrete to edit.
+    """Built-in defaults overlaid with settings.ini (creating it if absent)."""
+    settings = copy.deepcopy(DEFAULT_SETTINGS)
+
+    if not os.path.isfile(SETTINGS_PATH):
         try:
             with open(SETTINGS_PATH, "w", encoding="utf-8") as fh:
-                json.dump(DEFAULT_SETTINGS, fh, indent=2)
+                fh.write(SETTINGS_TEMPLATE)
         except Exception:
             pass
+        return settings
+
+    # interpolation=None so literal '%' in paths is never treated specially.
+    cp = configparser.ConfigParser(interpolation=None)
+    cp.optionxform = str  # keep key case as written
+    try:
+        cp.read(SETTINGS_PATH, encoding="utf-8")
     except Exception:
-        pass  # malformed file -> just use defaults
-    return _deep_merge(DEFAULT_SETTINGS, user)
+        return settings  # malformed file -> just use defaults
+
+    def gets(section, key):
+        return cp.get(section, key).strip() if cp.has_option(section, key) else None
+
+    # [ui]
+    for k in ("title", "geometry"):
+        v = gets("ui", k)
+        if v:
+            settings["ui"][k] = v
+    for k in ("min_width", "min_height"):
+        if cp.has_option("ui", k):
+            try:
+                settings["ui"][k] = cp.getint("ui", k)
+            except Exception:
+                pass
+
+    # [adb]
+    for k in ("default_host", "frida_remote"):
+        v = gets("adb", k)
+        if v:
+            settings["adb"][k] = v
+
+    # [keystore]
+    if cp.has_option("keystore", "auto_detect_globs"):
+        globs = _split_list(cp.get("keystore", "auto_detect_globs"))
+        if globs:
+            settings["keystore"]["auto_detect_globs"] = globs
+
+    # [tools.path] / [tools.names]
+    for tool in settings["tools"]:
+        p = gets("tools.path", tool)
+        if p is not None:
+            settings["tools"][tool]["path"] = p
+        if cp.has_option("tools.names", tool):
+            names = _split_list(cp.get("tools.names", tool))
+            if names:
+                settings["tools"][tool]["names"] = names
+
+    # [search_paths]
+    for k in settings["search_paths"]:
+        if cp.has_option("search_paths", k):
+            settings["search_paths"][k] = _split_list(cp.get("search_paths", k))
+
+    return settings
 
 
 SETTINGS = _load_settings()
@@ -251,7 +366,7 @@ def _find_in_dirs(dirs, names):
 
 
 # -- per-tool finders --------------------------------------------------------
-# Each looks for the executable names from settings.json on PATH first, then
+# Each looks for the executable names from settings.ini on PATH first, then
 # in the relevant search dirs (which already include any user-configured extras).
 
 def _tool_names(key):
@@ -347,7 +462,7 @@ class ToolManager:
 
     def resolve(self, key):
         """Resolve one tool, most explicit source first:
-        1. an exact "path" pinned in settings.json
+        1. an exact "path" pinned in settings.ini
         2. a path picked earlier via the ⚙ Tools dialog (apk_tool_gui.tools.json)
         3. auto-detection (PATH / Android SDK / emulator installs)
         """
