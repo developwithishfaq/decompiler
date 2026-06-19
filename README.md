@@ -52,6 +52,33 @@ without re-typing setup every day.
 - Every field is remembered between launches (`apk_tool_gui.config.json`, git-ignored)
 - No flashing `cmd` windows; all subprocess output streams into the app
 
+## Configuration
+
+All tunable defaults live in one hand-editable, committed file: **`settings.json`**
+(next to `apk_tool_gui.py`). Edit it to change behaviour — no code changes
+needed. Any missing or invalid key silently falls back to a built-in default,
+so you can keep only the keys you care about (or delete the file to regenerate
+it).
+
+| Key | What it controls |
+|---|---|
+| `ui.title` / `ui.geometry` / `ui.min_width` / `ui.min_height` | Window title and sizing |
+| `adb.default_host` | Prefilled ADB device (host:port) |
+| `adb.frida_remote` | Default on-device `frida-server` path |
+| `keystore.auto_detect_globs` | Patterns used to auto-fill the keystore field |
+| `tools.<tool>.names` | Executable filenames searched for each tool |
+| `search_paths.android_sdk_roots` | Extra Android SDK roots to scan |
+| `search_paths.build_tools_dirs` | Extra dirs holding `zipalign` / `apksigner` |
+| `search_paths.platform_tools_dirs` | Extra dirs holding `adb` |
+| `search_paths.emulator_dirs` | Extra emulator bin folders |
+| `search_paths.extra_tool_dirs` | Generic extra dirs searched for every tool |
+
+The app also keeps two **machine-specific, git-ignored** files it manages for
+you (no need to edit by hand):
+
+- `apk_tool_gui.config.json` — remembers your field values between launches
+- `apk_tool_gui.tools.json` — remembers tool paths you picked in **⚙ Tools**
+
 ## Seeded scripts
 
 On first run the app writes starter scripts into `scripts/` (git-ignored, regenerated):

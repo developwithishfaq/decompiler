@@ -38,12 +38,95 @@ TOOL_PATHS_PATH = os.path.join(APP_DIR, "apk_tool_gui.tools.json")
 # Folder where reusable Frida scripts live (managed by the Scripts tab)
 SCRIPTS_DIR = os.path.join(APP_DIR, "scripts")
 
-# A common emulator adb port (Nox); freely editable in the Frida/ADB tab.
-DEFAULT_ADB_HOST = "127.0.0.1:62001"
-DEFAULT_FRIDA_REMOTE = "/data/local/tmp/frida-server"
-
 # Stops child console apps (adb, apktool, frida-ps, ...) from flashing a cmd window.
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
+# ---------------------------------------------------------------------------
+# Editable project settings (settings.json)
+#
+# Everything a user might reasonably want to tune — window size, the default
+# adb host, the executable names we look for, and any extra folders to search
+# for tools — lives in settings.json next to this script. It's plain JSON,
+# committed to the repo, and safe to hand-edit. Missing/invalid keys silently
+# fall back to the built-in defaults below, so you can delete the file or keep
+# only the keys you care about.
+# ---------------------------------------------------------------------------
+
+SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+
+DEFAULT_SETTINGS = {
+    "ui": {
+        "title": "APK Tool GUI",
+        "geometry": "820x480",
+        "min_width": 700,
+        "min_height": 380,
+    },
+    "adb": {
+        # A common emulator adb port (Nox); editable in the Frida/ADB tab too.
+        "default_host": "127.0.0.1:62001",
+        "frida_remote": "/data/local/tmp/frida-server",
+    },
+    "keystore": {
+        # If exactly these patterns match a file next to the app, prefill it.
+        "auto_detect_globs": ["*.keystore", "*.jks"],
+    },
+    # The executable names to look for on PATH / in the search dirs, per tool.
+    "tools": {
+        "apktool":   {"names": ["apktool.bat", "apktool", "apktool.jar"]},
+        "zipalign":  {"names": ["zipalign.exe", "zipalign"]},
+        "apksigner": {"names": ["apksigner.bat", "apksigner", "apksigner.jar"]},
+        "adb":       {"names": ["adb.exe", "nox_adb.exe", "adb"]},
+        "frida_ps":  {"names": ["frida-ps.exe", "frida-ps"]},
+        "frida":     {"names": ["frida.exe", "frida"]},
+    },
+    # Extra folders to search, on top of the ones auto-detected from the
+    # Android SDK / common emulator installs. Add absolute paths here if your
+    # tools live somewhere unusual.
+    "search_paths": {
+        "android_sdk_roots": [],     # extra SDK roots (contain build-tools/, platform-tools/)
+        "build_tools_dirs": [],      # extra dirs holding zipalign / apksigner
+        "platform_tools_dirs": [],   # extra dirs holding adb
+        "emulator_dirs": [],         # extra emulator bin folders
+        "extra_tool_dirs": [],       # generic dirs searched for every tool
+    },
+}
+
+
+def _deep_merge(base, override):
+    """Recursively overlay `override` onto a copy of `base`."""
+    out = dict(base)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def _load_settings():
+    """Built-in defaults overlaid with settings.json (creating it if absent)."""
+    user = {}
+    try:
+        with open(SETTINGS_PATH, encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            user = loaded
+    except FileNotFoundError:
+        # Seed a starter file so users have something concrete to edit.
+        try:
+            with open(SETTINGS_PATH, "w", encoding="utf-8") as fh:
+                json.dump(DEFAULT_SETTINGS, fh, indent=2)
+        except Exception:
+            pass
+    except Exception:
+        pass  # malformed file -> just use defaults
+    return _deep_merge(DEFAULT_SETTINGS, user)
+
+
+SETTINGS = _load_settings()
+
+DEFAULT_ADB_HOST = SETTINGS["adb"]["default_host"]
+DEFAULT_FRIDA_REMOTE = SETTINGS["adb"]["frida_remote"]
 
 # ---------------------------------------------------------------------------
 # Generic tool discovery
@@ -84,6 +167,7 @@ def _android_sdk_roots():
         _home("Library", "Android", "sdk"),           # macOS
         _home("Android", "Sdk"),                       # Linux
     ]
+    roots += SETTINGS["search_paths"]["android_sdk_roots"]  # user-configured extras
     return _dedup_existing_dirs(roots)
 
 
@@ -97,14 +181,17 @@ def _build_tools_dirs():
                 full = os.path.join(bt, name)
                 if os.path.isdir(full):
                     dirs.append(full)
-    return dirs
+    dirs += SETTINGS["search_paths"]["build_tools_dirs"]
+    dirs += SETTINGS["search_paths"]["extra_tool_dirs"]
+    return _dedup_existing_dirs(dirs)
 
 
 def _platform_tools_dirs():
     """Android SDK platform-tools dirs (where adb lives)."""
-    return _dedup_existing_dirs(
-        os.path.join(root, "platform-tools") for root in _android_sdk_roots()
-    )
+    dirs = [os.path.join(root, "platform-tools") for root in _android_sdk_roots()]
+    dirs += SETTINGS["search_paths"]["platform_tools_dirs"]
+    dirs += SETTINGS["search_paths"]["extra_tool_dirs"]
+    return _dedup_existing_dirs(dirs)
 
 
 def _emulator_dirs():
@@ -136,6 +223,8 @@ def _emulator_dirs():
     for base in bases:
         for parts in subs:
             out.append(os.path.join(base, *parts))
+    out += SETTINGS["search_paths"]["emulator_dirs"]       # user-configured extras
+    out += SETTINGS["search_paths"]["extra_tool_dirs"]
     return _dedup_existing_dirs(out)
 
 
@@ -157,36 +246,43 @@ def _find_in_dirs(dirs, names):
 
 
 # -- per-tool finders --------------------------------------------------------
+# Each looks for the executable names from settings.json on PATH first, then
+# in the relevant search dirs (which already include any user-configured extras).
+
+def _tool_names(key):
+    return SETTINGS["tools"].get(key, {}).get("names", [])
+
 
 def _find_apktool():
-    return (_which(["apktool.bat", "apktool", "apktool.jar"])
-            or _find_in_dirs([APP_DIR] + _build_tools_dirs(),
-                             ["apktool.bat", "apktool.jar", "apktool"]))
+    names = _tool_names("apktool")
+    return _which(names) or _find_in_dirs([APP_DIR] + _build_tools_dirs(), names)
 
 
 def _find_zipalign():
-    return (_which(["zipalign.exe", "zipalign"])
-            or _find_in_dirs(_build_tools_dirs(), ["zipalign.exe", "zipalign"]))
+    names = _tool_names("zipalign")
+    return _which(names) or _find_in_dirs(_build_tools_dirs(), names)
 
 
 def _find_apksigner():
-    return (_which(["apksigner.bat", "apksigner"])
-            or _find_in_dirs(_build_tools_dirs(),
-                             ["apksigner.bat", "apksigner", "apksigner.jar"]))
+    names = _tool_names("apksigner")
+    return _which(names) or _find_in_dirs(_build_tools_dirs(), names)
 
 
 def _find_adb():
-    return (_which(["adb.exe", "adb"])
-            or _find_in_dirs(_platform_tools_dirs(), ["adb.exe", "adb"])
-            or _find_in_dirs(_emulator_dirs(), ["adb.exe", "nox_adb.exe", "adb"]))
+    names = _tool_names("adb")
+    return (_which(names)
+            or _find_in_dirs(_platform_tools_dirs(), names)
+            or _find_in_dirs(_emulator_dirs(), names))
 
 
 def _find_frida_ps():
-    return _which(["frida-ps.exe", "frida-ps"])
+    names = _tool_names("frida_ps")
+    return _which(names) or _find_in_dirs(_emulator_dirs(), names)
 
 
 def _find_frida():
-    return _which(["frida.exe", "frida"])
+    names = _tool_names("frida")
+    return _which(names) or _find_in_dirs(_emulator_dirs(), names)
 
 
 class ToolSpec:
@@ -311,7 +407,7 @@ TOOLS.resolve_all()
 
 def _default_keystore():
     """Prefill the keystore field if a single .keystore/.jks sits next to the app."""
-    for pat in ("*.keystore", "*.jks"):
+    for pat in SETTINGS["keystore"]["auto_detect_globs"]:
         hits = sorted(glob.glob(os.path.join(APP_DIR, pat)))
         if hits:
             return hits[0]
@@ -755,9 +851,10 @@ class Runner:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("APK Tool GUI")
-        self.geometry("820x480")
-        self.minsize(700, 380)
+        ui = SETTINGS["ui"]
+        self.title(ui["title"])
+        self.geometry(ui["geometry"])
+        self.minsize(ui["min_width"], ui["min_height"])
 
         self.log_queue = queue.Queue()
         self.busy = False

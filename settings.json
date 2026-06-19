@@ -1,0 +1,30 @@
+{
+  "ui": {
+    "title": "APK Tool GUI",
+    "geometry": "820x480",
+    "min_width": 700,
+    "min_height": 380
+  },
+  "adb": {
+    "default_host": "127.0.0.1:62001",
+    "frida_remote": "/data/local/tmp/frida-server"
+  },
+  "keystore": {
+    "auto_detect_globs": ["*.keystore", "*.jks"]
+  },
+  "tools": {
+    "apktool":   { "names": ["apktool.bat", "apktool", "apktool.jar"] },
+    "zipalign":  { "names": ["zipalign.exe", "zipalign"] },
+    "apksigner": { "names": ["apksigner.bat", "apksigner", "apksigner.jar"] },
+    "adb":       { "names": ["adb.exe", "nox_adb.exe", "adb"] },
+    "frida_ps":  { "names": ["frida-ps.exe", "frida-ps"] },
+    "frida":     { "names": ["frida.exe", "frida"] }
+  },
+  "search_paths": {
+    "android_sdk_roots": [],
+    "build_tools_dirs": [],
+    "platform_tools_dirs": [],
+    "emulator_dirs": [],
+    "extra_tool_dirs": []
+  }
+}
