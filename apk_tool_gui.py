@@ -89,6 +89,8 @@ DEFAULT_SETTINGS = {
         "zipalign":  {"path": "", "names": ["zipalign.exe", "zipalign"]},
         "apksigner": {"path": "", "names": ["apksigner.bat", "apksigner", "apksigner.jar"]},
         "adb":       {"path": "", "names": ["adb.exe", "nox_adb.exe", "adb"]},
+        "java":      {"path": "", "names": ["java.exe", "java"]},
+        "apkeditor": {"path": "", "names": ["APKEditor.jar", "apkeditor.jar"]},
         "frida_ps":  {"path": "", "names": ["frida-ps.exe", "frida-ps"]},
         "frida":     {"path": "", "names": ["frida.exe", "frida"]},
     },
@@ -145,6 +147,8 @@ apktool =
 zipalign =
 apksigner =
 adb =
+java =
+apkeditor =
 frida_ps =
 frida =
 
@@ -156,6 +160,8 @@ apktool = apktool.bat, apktool, apktool.jar
 zipalign = zipalign.exe, zipalign
 apksigner = apksigner.bat, apksigner, apksigner.jar
 adb = adb.exe, nox_adb.exe, adb
+java = java.exe, java
+apkeditor = APKEditor.jar, apkeditor.jar
 frida_ps = frida-ps.exe, frida-ps
 frida = frida.exe, frida
 
@@ -417,6 +423,37 @@ def _find_adb():
     return None
 
 
+def _java_dirs():
+    """Candidate dirs holding a java launcher (JDK/JRE), best-effort."""
+    dirs = []
+    for env in ("JAVA_HOME", "JRE_HOME"):
+        v = os.environ.get(env)
+        if v:
+            dirs.append(os.path.join(v, "bin"))
+    # Android Studio bundles a JDK (jbr); present on most machines that have apktool.
+    for env in ("ProgramFiles", "ProgramW6432", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if base:
+            dirs.append(os.path.join(base, "Android", "Android Studio", "jbr", "bin"))
+            dirs.append(os.path.join(base, "Android", "Android Studio", "jre", "bin"))
+    dirs += [os.path.join(d, "bin") for d in _android_sdk_roots()]
+    dirs += SETTINGS["search_paths"]["extra_tool_dirs"]
+    return _dedup_existing_dirs(dirs)
+
+
+def _find_java():
+    names = _tool_names("java") or ["java.exe", "java"]
+    return _which(names) or _find_in_dirs(_java_dirs(), names)
+
+
+def _find_apkeditor():
+    """APKEditor.jar — used to merge split APKs into one standalone APK.
+    Looked for first in this app's tools/ folder, then next to the app."""
+    names = _tool_names("apkeditor") or ["APKEditor.jar", "apkeditor.jar"]
+    dirs = [os.path.join(APP_DIR, "tools"), APP_DIR] + _build_tools_dirs()
+    return _find_in_dirs(dirs, names) or _which(names)
+
+
 def _find_frida_ps():
     names = _tool_names("frida_ps")
     return _which(names) or _find_in_dirs(_emulator_dirs(), names)
@@ -449,6 +486,15 @@ TOOL_SPECS = [
     ToolSpec("adb", "adb", _find_adb, True,
              "Android SDK platform-tools, or your emulator's bin folder "
              "(Nox / BlueStacks / LDPlayer / MEmu / Genymotion)."),
+    ToolSpec("java", "java", _find_java, False,
+             "Java runtime (JDK/JRE) — needed only to merge split APKs. "
+             "Bundled with Android Studio (jbr), or install a JDK and add it "
+             "to PATH / JAVA_HOME, then re-detect."),
+    ToolSpec("apkeditor", "APKEditor", _find_apkeditor, False,
+             "Merges split APKs into one standalone APK before decompiling so "
+             "native libs (.so) and split resources are included. Put "
+             "APKEditor.jar in this app's tools/ folder; get it from "
+             "https://github.com/REAndroid/APKEditor/releases."),
     ToolSpec("frida_ps", "frida-ps", _find_frida_ps, False,
              "Optional (process listing). Install with: pip install frida-tools"),
     ToolSpec("frida", "frida", _find_frida, False,
@@ -543,6 +589,14 @@ class ToolManager:
     @property
     def adb(self):
         return self.paths.get("adb")
+
+    @property
+    def java(self):
+        return self.paths.get("java")
+
+    @property
+    def apkeditor(self):
+        return self.paths.get("apkeditor")
 
     @property
     def frida_ps(self):
@@ -1011,10 +1065,13 @@ class App(tk.Tk):
         self.log_queue = queue.Queue()
         self.busy = False
         self.fs_proc = None  # running frida script session (Popen) or None
+        self.logcat_proc = None  # running adb logcat (Popen) or None
+        self.logcat_queue = queue.Queue()
 
         self._build_widgets()
         self._init_config()
         self._poll_log()
+        self._poll_logcat()
         self._show_tool_status()
         # First-run convenience: populate the library with starter scripts
         if not list_scripts():
@@ -1033,6 +1090,11 @@ class App(tk.Tk):
         if self.fs_proc is not None:
             try:
                 self.fs_proc.kill()
+            except Exception:
+                pass
+        if self.logcat_proc is not None:
+            try:
+                self.logcat_proc.kill()
             except Exception:
                 pass
         self.destroy()
@@ -1066,6 +1128,12 @@ class App(tk.Tk):
             # prefs
             "prefs_pkg": self.prefs_pkg,
             "prefs_su": self.prefs_su,
+            # pull apk
+            "pull_outdir": self.pull_outdir,
+            "pull_thirdparty": self.pull_thirdparty,
+            # logs
+            "logcat_tag": self.logcat_tag,
+            "logcat_prio": self.logcat_prio,
         }
         self._save_after_id = None
         self._load_config()
@@ -1128,12 +1196,16 @@ class App(tk.Tk):
         self.tab_scripts = ttk.Frame(nb)
         self.tab_fscript = ttk.Frame(nb)
         self.tab_prefs = ttk.Frame(nb)
+        self.tab_pull = ttk.Frame(nb)
+        self.tab_logs = ttk.Frame(nb)
         nb.add(self.tab_dec, text="  Decompile  ")
         nb.add(self.tab_rec, text="  Recompile + Sign  ")
         nb.add(self.tab_frida, text="  Frida / ADB  ")
         nb.add(self.tab_scripts, text="  Scripts  ")
         nb.add(self.tab_fscript, text="  Frida Script  ")
         nb.add(self.tab_prefs, text="  Prefs  ")
+        nb.add(self.tab_pull, text="  Pull APK  ")
+        nb.add(self.tab_logs, text="  Logs  ")
 
         self._build_decompile_tab()
         self._build_recompile_tab()
@@ -1141,6 +1213,8 @@ class App(tk.Tk):
         self._build_scripts_tab()
         self._build_frida_script_tab()
         self._build_prefs_tab()
+        self._build_pull_tab()
+        self._build_logs_tab()
 
         # Shared log area
         logframe = ttk.LabelFrame(self, text="Output")
@@ -1185,8 +1259,21 @@ class App(tk.Tk):
         ttk.Checkbutton(f, text="Overwrite if folder exists (-f)",
                         variable=self.dec_force).grid(row=3, column=1, sticky="w", pady=3)
 
+        self.dec_merge = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            f, text="Merge split APKs first  (include .so native libs + split "
+                    "resources — needed for Play / bundle apps)",
+            variable=self.dec_merge).grid(row=4, column=1, sticky="w", pady=3)
+
+        ttk.Label(
+            f, foreground="#888", wraplength=560, justify="left",
+            text="Pick base.apk (with its split_*.apk siblings in the same "
+                 "folder) or an .xapk/.apkm/.apks bundle, and they're merged "
+                 "into one complete APK before decompiling."
+        ).grid(row=5, column=1, sticky="w", padx=2)
+
         ttk.Button(f, text="Decompile", command=self.start_decompile).grid(
-            row=4, column=1, sticky="e", pady=6, padx=4)
+            row=6, column=1, sticky="e", pady=6, padx=4)
 
     def _build_recompile_tab(self):
         f = self.tab_rec
@@ -1410,9 +1497,13 @@ class App(tk.Tk):
 
     # -- file pickers --------------------------------------------------------
     def _pick_apk_dec(self):
-        p = filedialog.askopenfilename(title="Select APK",
-                                       filetypes=[("APK files", "*.apk"), ("All", "*.*")],
-                                       initialdir=APP_DIR)
+        p = filedialog.askopenfilename(
+            title="Select APK or split bundle",
+            filetypes=[("APK / bundles", "*.apk *.xapk *.apkm *.apks *.apkx"),
+                       ("APK files", "*.apk"),
+                       ("Split bundles", "*.xapk *.apkm *.apks *.apkx"),
+                       ("All", "*.*")],
+            initialdir=APP_DIR)
         if p:
             self.dec_apk.set(p)
             if not self.dec_name.get():
@@ -1738,6 +1829,117 @@ class App(tk.Tk):
         self.busy = busy
         self.set_status("Working…" if busy else "Ready")
 
+    # -- split-APK merging ---------------------------------------------------
+    # An app installed from Play as an "App Bundle" is split across several
+    # APKs: base.apk (code + most resources) plus config splits that carry the
+    # native libraries (lib/<abi>/*.so), per-density drawables and per-language
+    # strings. Decompiling base.apk alone therefore loses the .so files and the
+    # split resources, so the rebuilt app crashes with "libXxx.so not found".
+    # To get a COMPLETE decompile we first merge all splits into one standalone
+    # ("universal") APK with APKEditor, then hand that to apktool.
+    BUNDLE_EXTS = (".xapk", ".apkm", ".apks", ".apkx")
+
+    def _can_merge(self):
+        return bool(TOOLS.apkeditor and (TOOLS.java or shutil.which("java")))
+
+    def _jar_cmd(self, jar, args):
+        """Run a .jar via java (uses the resolved java, else whatever's on PATH)."""
+        java = TOOLS.java or "java"
+        return [java, "-jar", jar] + list(args)
+
+    @staticmethod
+    def _is_split_name(fname):
+        f = fname.lower()
+        return (f.startswith("split") or f.startswith("config.")
+                or ".config." in f)
+
+    def _sibling_split_set(self, apk):
+        """If `apk` sits next to split_*.apk / config*.apk siblings (i.e. it's the
+        base of a split set spilled into one folder), return the full list of
+        APKs to merge; otherwise None."""
+        d = os.path.dirname(os.path.abspath(apk))
+        try:
+            entries = [e for e in os.listdir(d) if e.lower().endswith(".apk")]
+        except OSError:
+            return None
+        splits = [e for e in entries if self._is_split_name(e)]
+        if not splits:
+            return None
+        bases = [e for e in entries if e.lower() == "base.apk"]
+        picked = os.path.basename(apk)
+        wanted = sorted(set(bases) | set(splits) | {picked})
+        full = [os.path.join(d, e) for e in wanted
+                if os.path.isfile(os.path.join(d, e))]
+        return full if len(full) > 1 else None
+
+    def _merge_dir(self, r, in_path, out_apk):
+        """Merge a directory (or .xapk/.apkm/.apks bundle) of splits into one
+        standalone APK via APKEditor. Returns out_apk on success, else None."""
+        if os.path.exists(out_apk):
+            try:
+                os.remove(out_apk)
+            except OSError:
+                pass
+        self.write("\n--- Merging split APKs → one standalone APK (APKEditor) ---\n")
+        cmd = self._jar_cmd(TOOLS.apkeditor, ["m", "-i", in_path, "-o", out_apk, "-f"])
+        if r.run(cmd) == 0 and os.path.isfile(out_apk):
+            self.write(f"\n✔ Merged standalone APK: {out_apk}\n")
+            return out_apk
+        self.write("\n✗ Split merge FAILED — falling back to the base APK only.\n")
+        return None
+
+    def _resolve_decompile_source(self, r, apk, work_dir):
+        """Decide what to actually feed apktool. For a split-APK app (a bundle
+        file, or a base.apk with sibling splits) merge first so the decompile is
+        complete. For an ordinary standalone APK, return it unchanged."""
+        ext = os.path.splitext(apk)[1].lower()
+        is_bundle = ext in self.BUNDLE_EXTS
+        split_set = None if is_bundle else self._sibling_split_set(apk)
+
+        if not is_bundle and not split_set:
+            return apk   # ordinary standalone APK — nothing to merge
+
+        if not self._can_merge():
+            self.write(
+                "\n[!] This is a split-APK app, but APKEditor/Java were not found, "
+                "so only the base APK can be decompiled — native libs (.so) and "
+                "split resources will be MISSING and the rebuilt app may crash.\n"
+                "    Put APKEditor.jar in this app's tools/ folder (⚙ Tools) to "
+                "enable automatic merging.\n")
+            return apk
+
+        stem = os.path.splitext(os.path.basename(apk))[0] or "app"
+        out_apk = os.path.join(work_dir, stem + "_universal.apk")
+
+        if is_bundle:
+            return self._merge_dir(r, apk, out_apk) or apk
+
+        # base.apk + sibling splits: stage them in a temp dir so APKEditor only
+        # sees this app's parts (the source folder may hold unrelated APKs).
+        tmp = tempfile.mkdtemp(prefix="apkmerge_")
+        try:
+            for f in split_set:
+                shutil.copy2(f, os.path.join(tmp, os.path.basename(f)))
+            return self._merge_dir(r, tmp, out_apk) or apk
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _report_lib_status(self, dec_dir):
+        """After a decompile, summarise the native libs that made it in."""
+        libdir = os.path.join(dec_dir, "lib")
+        sos, abis = [], []
+        if os.path.isdir(libdir):
+            abis = sorted(d for d in os.listdir(libdir)
+                          if os.path.isdir(os.path.join(libdir, d)))
+            for root, _dirs, files in os.walk(libdir):
+                sos += [f for f in files if f.endswith(".so")]
+        if sos:
+            self.write(f"   ✔ Native libs included: {len(sos)} .so "
+                       f"({', '.join(abis)})\n")
+        else:
+            self.write("   ℹ No native .so libraries in this APK "
+                       "(fine if the app has none).\n")
+
     # -- decompile -----------------------------------------------------------
     def start_decompile(self):
         if self.busy:
@@ -1763,13 +1965,20 @@ class App(tk.Tk):
     def _do_decompile(self, apk, out):
         self._set_busy(True)
         r = Runner(self.log_queue)
+
+        source = apk
+        if self.dec_merge.get():
+            work_dir = os.path.dirname(os.path.abspath(out)) or APP_DIR
+            source = self._resolve_decompile_source(r, apk, work_dir)
+
         cmd = [TOOLS.apktool, "d"]
         if self.dec_force.get():
             cmd.append("-f")
-        cmd += [apk, "-o", out]
+        cmd += [source, "-o", out]
         code = r.run(cmd)
         if code == 0:
             self.write(f"\n✔ Decompiled to: {out}\n")
+            self._report_lib_status(out)
             self.set_status("Decompile complete")
         else:
             self.write("\n✗ Decompile FAILED.\n")
@@ -2386,6 +2595,418 @@ class App(tk.Tk):
         rc, out = self._capture(self._prefs_shell(f"rm -f {self._prefs_base()}/{fn}"))
         self.write(f"\n[deleted {fn}] {out.strip()}\n")
         self._do_prefs_list()
+
+    # -- pull apk tab --------------------------------------------------------
+    def _build_pull_tab(self):
+        f = self.tab_pull
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(1, weight=1)
+
+        self.pull_outdir = tk.StringVar(value=APP_DIR)
+        self.pull_thirdparty = tk.BooleanVar(value=True)
+        self.pull_merge = tk.BooleanVar(value=True)
+
+        # Top controls
+        ctrl = ttk.Frame(f)
+        ctrl.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 2))
+        ctrl.columnconfigure(1, weight=1)
+
+        ttk.Label(ctrl, text="Filter:").grid(row=0, column=0, sticky="w")
+        self.pull_filter = tk.StringVar()
+        self.pull_filter.trace_add("write", lambda *_: self._apply_pull_filter())
+        ttk.Entry(ctrl, textvariable=self.pull_filter, width=24).grid(
+            row=0, column=1, sticky="ew", padx=(4, 8))
+
+        ttk.Checkbutton(ctrl, text="3rd-party only",
+                        variable=self.pull_thirdparty).grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(ctrl, text="↻ Refresh list",
+                   command=self.pull_refresh).grid(row=0, column=3)
+
+        # Package list
+        listwrap = ttk.Frame(f)
+        listwrap.grid(row=1, column=0, sticky="nsew", padx=8, pady=2)
+        listwrap.columnconfigure(0, weight=1)
+        listwrap.rowconfigure(0, weight=1)
+
+        self.pull_list = tk.Listbox(listwrap, height=8, activestyle="dotbox",
+                                    selectmode="extended")
+        self.pull_list.grid(row=0, column=0, sticky="nsew")
+        vsb = ttk.Scrollbar(listwrap, command=self.pull_list.yview)
+        vsb.grid(row=0, column=1, sticky="ns")
+        self.pull_list.config(yscrollcommand=vsb.set)
+        self._pull_all_packages = []   # full unfiltered list
+
+        # Output dir row
+        outrow = ttk.Frame(f)
+        outrow.grid(row=2, column=0, sticky="ew", padx=8, pady=(4, 2))
+        outrow.columnconfigure(1, weight=1)
+        ttk.Label(outrow, text="Save to:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(outrow, textvariable=self.pull_outdir).grid(
+            row=0, column=1, sticky="ew", padx=(4, 4))
+        ttk.Button(outrow, text="Browse…",
+                   command=self._pick_pull_outdir).grid(row=0, column=2)
+
+        # Action buttons
+        btnrow = ttk.Frame(f)
+        btnrow.grid(row=3, column=0, sticky="ew", padx=8, pady=(2, 2))
+        ttk.Button(btnrow, text="Pull APK(s)",
+                   command=self.pull_apks).pack(side="left", padx=(0, 6))
+        ttk.Button(btnrow, text="Pull + Decompile",
+                   command=self.pull_and_decompile).pack(side="left")
+        ttk.Checkbutton(btnrow, text="Merge splits into one APK",
+                        variable=self.pull_merge).pack(side="left", padx=(12, 0))
+        ttk.Label(btnrow, text="Ctrl/Shift-click to select multiple",
+                  foreground="#888").pack(side="right")
+
+        # Split-APK hint
+        hint = (
+            "Pull grabs ALL of an app's APKs (base.apk + every split) into "
+            "<save-to>/<package>/.  Play-installed games are split bundles: the "
+            "native libraries (libgame.so, etc.) and per-density / per-language "
+            "resources live in the config splits, NOT in base.apk.  With \"Merge "
+            "splits\" on, they're combined into one complete <package>_universal.apk "
+            "(via APKEditor) before decompiling — so the .so files and split "
+            "resources are all there and the rebuilt APK won't crash with "
+            "\"libXxx.so not found\".  Merging needs APKEditor.jar (in tools/) + Java."
+        )
+        ttk.Label(f, text=hint, foreground="#888", wraplength=780,
+                  justify="left").grid(row=4, column=0, sticky="w",
+                                       padx=8, pady=(2, 6))
+
+    def _pick_pull_outdir(self):
+        p = filedialog.askdirectory(title="Save APKs to",
+                                    initialdir=self.pull_outdir.get() or APP_DIR)
+        if p:
+            self.pull_outdir.set(p)
+
+    def pull_refresh(self):
+        if not TOOLS.adb:
+            messagebox.showerror("Error", "adb not found. Click '⚙ Tools' to locate it.")
+            return
+        threading.Thread(target=self._do_pull_refresh, daemon=True).start()
+
+    def _do_pull_refresh(self):
+        self.write("\n--- Listing device packages ---\n")
+        host = self.frida_host.get().strip()
+        cmd = [TOOLS.adb] + (["-s", host] if host else []) + \
+              ["shell", "pm", "list", "packages"]
+        if self.pull_thirdparty.get():
+            cmd.append("-3")
+        rc, out = self._capture(cmd)
+        packages = sorted(
+            line.strip()[len("package:"):] for line in out.splitlines()
+            if line.strip().startswith("package:")
+        )
+        self.write(f"Found {len(packages)} package(s).\n")
+        self._pull_all_packages = packages
+        self.after(0, self._apply_pull_filter)
+
+    def _apply_pull_filter(self):
+        filt = self.pull_filter.get().strip().lower()
+        shown = [p for p in self._pull_all_packages if filt in p.lower()] \
+                if filt else list(self._pull_all_packages)
+        self.pull_list.delete(0, "end")
+        for p in shown:
+            self.pull_list.insert("end", p)
+
+    def _selected_packages(self):
+        return [self.pull_list.get(i) for i in self.pull_list.curselection()]
+
+    def pull_apks(self):
+        pkgs = self._selected_packages()
+        if not pkgs:
+            messagebox.showinfo("No selection", "Select one or more packages first.")
+            return
+        if not TOOLS.adb:
+            messagebox.showerror("Error", "adb not found.")
+            return
+        outdir = self.pull_outdir.get().strip() or APP_DIR
+        threading.Thread(target=self._do_pull_apks,
+                         args=(pkgs, outdir, False), daemon=True).start()
+
+    def pull_and_decompile(self):
+        pkgs = self._selected_packages()
+        if not pkgs:
+            messagebox.showinfo("No selection", "Select a package first.")
+            return
+        if len(pkgs) > 1:
+            messagebox.showinfo("One at a time",
+                                "Pull + Decompile works on one package at a time.")
+            return
+        if not TOOLS.adb:
+            messagebox.showerror("Error", "adb not found.")
+            return
+        if not TOOLS.apktool:
+            messagebox.showerror("Error", "apktool not found. Click '⚙ Tools' to locate it.")
+            return
+        outdir = self.pull_outdir.get().strip() or APP_DIR
+        threading.Thread(target=self._do_pull_apks,
+                         args=(pkgs, outdir, True), daemon=True).start()
+
+    def _do_pull_apks(self, packages, outdir, decompile_after):
+        host = self.frida_host.get().strip()
+        adb_base = [TOOLS.adb] + (["-s", host] if host else [])
+        r = Runner(self.log_queue)
+
+        for pkg in packages:
+            self.write(f"\n=== {pkg} ===\n")
+            pkg_dir = os.path.join(outdir, pkg)
+            os.makedirs(pkg_dir, exist_ok=True)
+
+            # Get all APK paths for this package (handles splits)
+            rc, out = self._capture(adb_base + ["shell", "pm", "path", pkg])
+            paths = []
+            for line in out.splitlines():
+                line = line.strip()
+                if line.startswith("package:"):
+                    paths.append(line[len("package:"):])
+
+            if not paths:
+                self.write(f"[WARN] No APK paths found for {pkg}. "
+                           f"Is the package installed?\n")
+                continue
+
+            self.write(f"Found {len(paths)} APK file(s):\n")
+            for p in paths:
+                self.write(f"  {p}\n")
+
+            # Pull each APK — keep its original filename (base.apk, split_*.apk, …)
+            pulled = []
+            for remote in paths:
+                fname = os.path.basename(remote)
+                local = os.path.join(pkg_dir, fname)
+                if r.run(adb_base + ["pull", remote, local]) == 0:
+                    pulled.append(local)
+
+            if not pulled:
+                self.write(f"✗ No files pulled for {pkg}.\n")
+                continue
+
+            self.write(f"\n✔ Pulled to: {pkg_dir}\n")
+
+            bases = [p for p in pulled if os.path.basename(p) == "base.apk"]
+            splits = [p for p in pulled if os.path.basename(p) != "base.apk"]
+
+            # Merge splits into one standalone APK so the result is complete
+            # (native .so libs + per-density / per-language split resources).
+            source_apk = bases[0] if bases else pulled[0]
+            want_merge = bool(splits) and self.pull_merge.get()
+            if want_merge and not self._can_merge():
+                self.write(
+                    f"\n[Split APK] {len(splits)} split(s) detected, but "
+                    "APKEditor/Java were not found, so they can't be merged.\n"
+                    "  base.apk alone is MISSING the native libs (.so) and split "
+                    "resources — a rebuilt app will likely crash.\n"
+                    "  Put APKEditor.jar in this app's tools/ folder (⚙ Tools), "
+                    "then pull again.\n")
+            elif want_merge:
+                self.write(
+                    f"\n[Split APK] {len(splits)} split(s) detected — merging "
+                    "into one standalone APK so nothing is missing:\n")
+                for s in splits:
+                    self.write(f"  {os.path.basename(s)}\n")
+                universal = os.path.join(outdir, pkg + "_universal.apk")
+                merged = self._merge_dir(r, pkg_dir, universal)
+                if merged:
+                    source_apk = merged
+
+            # Decompile if requested
+            if decompile_after:
+                if not TOOLS.apktool:
+                    self.write("[WARN] apktool not found — skipped decompile.\n")
+                else:
+                    dec_out = os.path.join(outdir, pkg + "_decompiled")
+                    self.write(f"\n--- Decompiling {os.path.basename(source_apk)} ---\n")
+                    cmd = [TOOLS.apktool, "d", "-f", source_apk, "-o", dec_out]
+                    if r.run(cmd) == 0:
+                        self.write(f"\n✔ Decompiled to: {dec_out}\n")
+                        self._report_lib_status(dec_out)
+                    else:
+                        self.write("\n✗ Decompile failed.\n")
+
+        self.set_status("Pull complete")
+
+    # -- logcat tab ----------------------------------------------------------
+    def _build_logs_tab(self):
+        f = self.tab_logs
+        f.columnconfigure(0, weight=1)
+        f.rowconfigure(1, weight=1)
+
+        self.logcat_tag = tk.StringVar(value="")
+        self.logcat_prio = tk.StringVar(value="*:V")
+
+        # Controls row
+        ctrl = ttk.Frame(f)
+        ctrl.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 2))
+
+        ttk.Label(ctrl, text="Tag filter:").pack(side="left")
+        ttk.Entry(ctrl, textvariable=self.logcat_tag, width=20).pack(side="left", padx=(4, 12))
+
+        ttk.Label(ctrl, text="Priority:").pack(side="left")
+        prio_box = ttk.Combobox(ctrl, textvariable=self.logcat_prio, state="readonly", width=8,
+                                values=["*:V", "*:D", "*:I", "*:W", "*:E"])
+        prio_box.pack(side="left", padx=(4, 12))
+
+        self.logcat_attach_btn = ttk.Button(ctrl, text="▶  Attach", command=self.logcat_attach)
+        self.logcat_attach_btn.pack(side="left", padx=4)
+        self.logcat_detach_btn = ttk.Button(ctrl, text="■  Detach", command=self.logcat_detach,
+                                            state="disabled")
+        self.logcat_detach_btn.pack(side="left", padx=4)
+        ttk.Button(ctrl, text="Clear", command=self._clear_logcat).pack(side="left", padx=4)
+        ttk.Button(ctrl, text="Save…", command=self._save_logcat).pack(side="left", padx=4)
+
+        hint = ttk.Label(ctrl, text="Uses ADB device from Frida/ADB tab.", foreground="#888")
+        hint.pack(side="right", padx=8)
+
+        # Log area with its own scrollbar
+        logwrap = ttk.Frame(f)
+        logwrap.grid(row=1, column=0, sticky="nsew", padx=8, pady=(2, 6))
+        logwrap.columnconfigure(0, weight=1)
+        logwrap.rowconfigure(0, weight=1)
+
+        self.logcat_text = tk.Text(logwrap, wrap="none", bg="#0d1117", fg="#c9d1d9",
+                                   insertbackground="#c9d1d9", font=("Consolas", 9))
+        self.logcat_text.grid(row=0, column=0, sticky="nsew")
+
+        vsb = ttk.Scrollbar(logwrap, command=self.logcat_text.yview)
+        vsb.grid(row=0, column=1, sticky="ns")
+        self.logcat_text.config(yscrollcommand=vsb.set)
+
+        hsb = ttk.Scrollbar(logwrap, orient="horizontal", command=self.logcat_text.xview)
+        hsb.grid(row=1, column=0, sticky="ew")
+        self.logcat_text.config(xscrollcommand=hsb.set)
+
+        # Colour tags for log levels
+        self.logcat_text.tag_configure("V", foreground="#8b949e")
+        self.logcat_text.tag_configure("D", foreground="#79c0ff")
+        self.logcat_text.tag_configure("I", foreground="#56d364")
+        self.logcat_text.tag_configure("W", foreground="#e3b341")
+        self.logcat_text.tag_configure("E", foreground="#f85149")
+        self.logcat_text.tag_configure("F", foreground="#ff7b72")
+
+    def _poll_logcat(self):
+        try:
+            while True:
+                line = self.logcat_queue.get_nowait()
+                tag = self._logcat_level_tag(line)
+                self.logcat_text.insert("end", line, tag)
+                self.logcat_text.see("end")
+        except queue.Empty:
+            pass
+        self.after(80, self._poll_logcat)
+
+    @staticmethod
+    def _logcat_level_tag(line):
+        """Return a colour tag based on the log-level letter in a logcat line."""
+        # Standard logcat format: "MM-DD HH:MM:SS.mmm  PID  TID LEVEL tag: msg"
+        # The level character is at index 31 on fixed-width output, but we do a
+        # simple scan of the first two fields for a single-letter level word.
+        parts = line.split()
+        for i, p in enumerate(parts):
+            if len(p) == 1 and p in "VDIWEF" and i >= 2:
+                return p
+        return ""
+
+    def logcat_attach(self):
+        if not TOOLS.adb:
+            messagebox.showerror("Error", "adb not found. Click '⚙ Tools' to locate it.")
+            return
+        if self.logcat_proc is not None:
+            messagebox.showinfo("Already running", "Logcat is already attached. Detach first.")
+            return
+        threading.Thread(target=self._do_logcat_attach, daemon=True).start()
+
+    def _do_logcat_attach(self):
+        host = self.frida_host.get().strip()
+        tag = self.logcat_tag.get().strip()
+        prio = self.logcat_prio.get().strip() or "*:V"
+
+        cmd = [TOOLS.adb]
+        if host:
+            cmd += ["-s", host]
+        cmd.append("logcat")
+
+        # Build the filter spec
+        if tag:
+            level = prio.split(":")[-1] if ":" in prio else "V"
+            cmd += [f"{tag}:{level}", "*:S"]
+        else:
+            cmd.append(prio)
+
+        printable = " ".join(f'"{c}"' if " " in c else c for c in cmd)
+        self.logcat_queue.put(f"\n$ {printable}\n")
+
+        try:
+            self.logcat_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                creationflags=CREATE_NO_WINDOW,
+            )
+        except Exception as e:
+            self.logcat_queue.put(f"[ERROR] Could not start logcat: {e}\n")
+            self.logcat_proc = None
+            return
+
+        self.after(0, lambda: self.logcat_attach_btn.config(state="disabled"))
+        self.after(0, lambda: self.logcat_detach_btn.config(state="normal"))
+        self.set_status("Logcat attached…")
+
+        for line in self.logcat_proc.stdout:
+            self.logcat_queue.put(line)
+
+        self.logcat_proc.wait()
+        code = self.logcat_proc.returncode
+        self.logcat_queue.put(f"\n[logcat ended, exit code: {code}]\n")
+        self.logcat_proc = None
+        self.after(0, lambda: self.logcat_attach_btn.config(state="normal"))
+        self.after(0, lambda: self.logcat_detach_btn.config(state="disabled"))
+        self.set_status("Logcat detached")
+
+    def logcat_detach(self):
+        proc = self.logcat_proc
+        if proc is None:
+            return
+        self.logcat_queue.put("\n[detaching logcat…]\n")
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+        except Exception as e:
+            self.logcat_queue.put(f"[ERROR] detach failed: {e}\n")
+
+    def _clear_logcat(self):
+        try:
+            while True:
+                self.logcat_queue.get_nowait()
+        except queue.Empty:
+            pass
+        self.logcat_text.delete("1.0", "end")
+
+    def _save_logcat(self):
+        content = self.logcat_text.get("1.0", "end-1c")
+        if not content.strip():
+            messagebox.showinfo("Empty", "No log content to save.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save logcat", defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("Log files", "*.log"), ("All", "*.*")],
+            initialdir=APP_DIR)
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(content)
+            self.set_status(f"Saved logcat: {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not save:\n{e}")
 
     # -- frida script runner -------------------------------------------------
     def frida_run(self):

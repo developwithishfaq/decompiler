@@ -15,12 +15,19 @@ without re-typing setup every day.
 
 **Decompile / Recompile + Sign**
 - Decompile an APK with `apktool` into a named folder
+- **Split-APK aware:** Play / App Bundle apps (a `base.apk` + `split_config.*`
+  parts, or an `.xapk`/`.apkm`/`.apks` bundle) are auto-merged into one complete
+  APK via `APKEditor` before decompiling, so native libraries (`lib/<abi>/*.so`)
+  and split resources are included — no more `dlopen failed: library "libXxx.so"
+  not found` after recompiling
 - Rebuild → `zipalign` → `apksigner` sign → verify, in one click
 - Auto-detects `apktool`, `zipalign`, `apksigner` from PATH / Android build-tools
 
 **Generic, zero-config tool discovery**
-- Finds every external tool (`apktool`, `zipalign`, `apksigner`, `adb`,
-  `frida`/`frida-ps`) automatically — no machine-specific paths baked in
+- Finds every external tool (`apktool`, `zipalign`, `apksigner`, `adb`, `java`,
+  `APKEditor`, `frida`/`frida-ps`) automatically — no machine-specific paths
+  baked in (`APKEditor.jar` ships in `tools/`; `java` is found via PATH /
+  `JAVA_HOME` / Android Studio's bundled JRE)
 - Looks in: saved overrides → system PATH → Android SDK (`build-tools`,
   `platform-tools`, picked up from `ANDROID_HOME`/`ANDROID_SDK_ROOT` or the
   standard Studio install on Windows/macOS/Linux) → common emulator installs
