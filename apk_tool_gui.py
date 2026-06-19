@@ -1217,6 +1217,7 @@ class App(tk.Tk):
             # prefs
             "prefs_pkg": self.prefs_pkg,
             "prefs_su": self.prefs_su,
+            "prefs_thirdparty": self.prefs_thirdparty,
             # pull apk
             "pull_outdir": self.pull_outdir,
             "pull_thirdparty": self.pull_thirdparty,
@@ -1275,6 +1276,10 @@ class App(tk.Tk):
         ttk.Button(header, text="↻ Refresh", command=self.refresh_state).pack(side="right")
         ttk.Button(header, text="▶ Run last", command=self.run_last).pack(side="right", padx=6)
         ttk.Button(header, text="⚙ Tools", command=self.open_tools_dialog).pack(side="right", padx=6)
+
+        # Device details (name / Android version / supported ABIs), filled on refresh
+        self.devinfo = ttk.Label(self, text="", foreground="#7aa2cc", anchor="w")
+        self.devinfo.pack(fill="x", padx=10, pady=(2, 0))
 
         nb = ttk.Notebook(self)
         nb.pack(fill="x", padx=10, pady=(6, 0))
@@ -1551,17 +1556,44 @@ class App(tk.Tk):
         ttk.Label(top, text="Package:").grid(row=0, column=0, sticky="w")
         self.prefs_pkg = tk.StringVar()
         ttk.Entry(top, textvariable=self.prefs_pkg).grid(row=0, column=1, sticky="ew", padx=6)
-        ttk.Button(top, text="Use Frida target",
-                   command=lambda: self.prefs_pkg.set(self.fs_target.get().strip())
-                   ).grid(row=0, column=2)
 
         self.prefs_su = tk.BooleanVar(value=False)
         ttk.Checkbutton(f, text="Use root via su (needed for most apps)",
                         variable=self.prefs_su).grid(row=1, column=0, sticky="w", padx=8, pady=2)
 
+        # Package picker (same pattern as the Pull APK screen)
+        self.prefs_thirdparty = tk.BooleanVar(value=True)
+        pkgctrl = ttk.Frame(f)
+        pkgctrl.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 2))
+        pkgctrl.columnconfigure(1, weight=1)
+        ttk.Label(pkgctrl, text="Filter:").grid(row=0, column=0, sticky="w")
+        self.prefs_filter = tk.StringVar()
+        self.prefs_filter.trace_add("write", lambda *_: self._apply_prefs_pkg_filter())
+        ttk.Entry(pkgctrl, textvariable=self.prefs_filter, width=24).grid(
+            row=0, column=1, sticky="ew", padx=(4, 8))
+        ttk.Checkbutton(pkgctrl, text="3rd-party only",
+                        variable=self.prefs_thirdparty).grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(pkgctrl, text="↻ Refresh list",
+                   command=self.prefs_refresh).grid(row=0, column=3)
+
+        pkgwrap = ttk.Frame(f)
+        pkgwrap.grid(row=3, column=0, columnspan=2, sticky="nsew", padx=8, pady=2)
+        f.rowconfigure(3, weight=1)
+        pkgwrap.columnconfigure(0, weight=1)
+        pkgwrap.rowconfigure(0, weight=1)
+        self.prefs_pkg_list = tk.Listbox(pkgwrap, height=5, activestyle="dotbox")
+        self.prefs_pkg_list.grid(row=0, column=0, sticky="nsew")
+        pkgsb = ttk.Scrollbar(pkgwrap, command=self.prefs_pkg_list.yview)
+        pkgsb.grid(row=0, column=1, sticky="ns")
+        self.prefs_pkg_list.config(yscrollcommand=pkgsb.set)
+        self._prefs_all_packages = []   # full unfiltered list
+        # Single-click fills the Package field; double-click also lists its prefs.
+        self.prefs_pkg_list.bind("<<ListboxSelect>>", self._on_prefs_pkg_select)
+        self.prefs_pkg_list.bind("<Double-Button-1>", self._on_prefs_pkg_activate)
+
         listwrap = ttk.Frame(f)
-        listwrap.grid(row=2, column=0, sticky="nsew", padx=(8, 4), pady=2)
-        f.rowconfigure(2, weight=1)
+        listwrap.grid(row=4, column=0, sticky="nsew", padx=(8, 4), pady=2)
+        f.rowconfigure(4, weight=1)
         self.prefs_list = tk.Listbox(listwrap, height=7, activestyle="dotbox")
         self.prefs_list.pack(side="left", fill="both", expand=True)
         plb = ttk.Scrollbar(listwrap, command=self.prefs_list.yview)
@@ -1570,7 +1602,7 @@ class App(tk.Tk):
         self.prefs_list.bind("<Double-Button-1>", lambda e: self.prefs_edit())
 
         side = ttk.Frame(f)
-        side.grid(row=2, column=1, sticky="n", padx=(4, 8), pady=2)
+        side.grid(row=4, column=1, sticky="n", padx=(4, 8), pady=2)
         for txt, cmd in [
             ("List files", self.prefs_listfiles),
             ("View / Edit", self.prefs_edit),
@@ -1578,11 +1610,13 @@ class App(tk.Tk):
         ]:
             ttk.Button(side, text=txt, width=12, command=cmd).pack(fill="x", pady=2)
 
-        hint = ("Reads /data/data/<pkg>/shared_prefs/*.xml over adb (no Frida). "
-                "Edit while the app is closed so it doesn't overwrite your changes, "
-                "then restart the app to load them.")
+        hint = ("Refresh to list installed packages, click one to fill Package "
+                "(double-click also lists its prefs). Reads "
+                "/data/data/<pkg>/shared_prefs/*.xml over adb (no Frida). Edit while "
+                "the app is closed so it doesn't overwrite your changes, then "
+                "restart the app to load them.")
         ttk.Label(f, text=hint, foreground="#888", wraplength=760, justify="left").grid(
-            row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 4))
+            row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 4))
 
     # -- file pickers --------------------------------------------------------
     def _pick_apk_dec(self):
@@ -2237,6 +2271,7 @@ class App(tk.Tk):
         r.run([TOOLS.adb, "devices"])
         self.set_status("adb connect done")
         self._set_busy(False)
+        self.refresh_state()   # updates the status bar with device name / Android / ABIs
 
     def frida_start(self):
         if not self._frida_guard():
@@ -2439,6 +2474,33 @@ class App(tk.Tk):
         else:
             label.config(text=f"{name}: ● ?", foreground="#888")
 
+    def _device_summary(self):
+        """One-line description of the connected device: name, Android, ABIs.
+
+        Returns "" if it can't be read. Uses a single adb shell round-trip that
+        runs `getprop` for each key in order, so the values line up by index.
+        """
+        keys = ["ro.product.manufacturer", "ro.product.model",
+                "ro.build.version.release", "ro.build.version.sdk",
+                "ro.product.cpu.abilist"]
+        inner = " ; ".join(f"getprop {k}" for k in keys)
+        rc, out = self._capture(self._adb(["shell", inner]))
+        if rc != 0:
+            return ""
+        vals = [ln.strip() for ln in out.splitlines()]
+        vals += [""] * (len(keys) - len(vals))   # pad if a trailing prop was empty
+        mfr, model, rel, sdk, abis = vals[:5]
+        name = f"{mfr} {model}".strip() or "device"
+        parts = [name]
+        if rel or sdk:
+            ver = f"Android {rel or '?'}"
+            if sdk:
+                ver += f" (API {sdk})"
+            parts.append(ver)
+        if abis:
+            parts.append(abis)
+        return "   ·   ".join(parts)
+
     def _do_refresh_state(self):
         host = self.frida_host.get().strip()
         connected = None
@@ -2446,6 +2508,15 @@ class App(tk.Tk):
             rc, out = self._capture([TOOLS.adb, "-s", host, "get-state"])
             connected = (out.strip() == "device")
         self.after(0, lambda: self._set_state(self.state_device, "Device", connected))
+
+        if connected:
+            summary = self._device_summary() or "Device connected (couldn't read properties)"
+            self.after(0, lambda s=summary: self.devinfo.config(text=s, foreground="#7aa2cc"))
+        elif connected is False:
+            self.after(0, lambda: self.devinfo.config(text="No device connected",
+                                                      foreground="#888"))
+        else:
+            self.after(0, lambda: self.devinfo.config(text=""))
 
         running = None
         if connected:
@@ -2579,6 +2650,47 @@ class App(tk.Tk):
         sel = self.prefs_list.curselection()
         return self.prefs_list.get(sel[0]) if sel else None
 
+    # -- package picker ------------------------------------------------------
+    def prefs_refresh(self):
+        if not TOOLS.adb:
+            messagebox.showerror("Error", "adb not found. Click '⚙ Tools' to locate it.")
+            return
+        threading.Thread(target=self._do_prefs_pkg_refresh, daemon=True).start()
+
+    def _do_prefs_pkg_refresh(self):
+        self.write("\n--- Listing device packages ---\n")
+        host = self.frida_host.get().strip()
+        cmd = [TOOLS.adb] + (["-s", host] if host else []) + \
+              ["shell", "pm", "list", "packages"]
+        if self.prefs_thirdparty.get():
+            cmd.append("-3")
+        rc, out = self._capture(cmd)
+        packages = sorted(
+            line.strip()[len("package:"):] for line in out.splitlines()
+            if line.strip().startswith("package:")
+        )
+        self.write(f"Found {len(packages)} package(s).\n")
+        self._prefs_all_packages = packages
+        self.after(0, self._apply_prefs_pkg_filter)
+
+    def _apply_prefs_pkg_filter(self):
+        filt = self.prefs_filter.get().strip().lower()
+        shown = [p for p in self._prefs_all_packages if filt in p.lower()] \
+                if filt else list(self._prefs_all_packages)
+        self.prefs_pkg_list.delete(0, "end")
+        for p in shown:
+            self.prefs_pkg_list.insert("end", p)
+
+    def _on_prefs_pkg_select(self, _event=None):
+        sel = self.prefs_pkg_list.curselection()
+        if sel:
+            self.prefs_pkg.set(self.prefs_pkg_list.get(sel[0]))
+
+    def _on_prefs_pkg_activate(self, _event=None):
+        self._on_prefs_pkg_select()
+        if self.prefs_pkg.get().strip():
+            self.prefs_listfiles()
+
     def prefs_listfiles(self):
         if not self._prefs_guard():
             return
@@ -2625,10 +2737,84 @@ class App(tk.Tk):
         win.transient(self)
         ttk.Label(win, text=f"{self._prefs_base()}/{fn}",
                   foreground="#888").pack(anchor="w", padx=8, pady=(8, 2))
+
+        # Search bar (Ctrl+F focuses it; Enter / Shift+Enter step matches)
+        search = ttk.Frame(win)
+        search.pack(fill="x", padx=8, pady=(0, 2))
+        ttk.Label(search, text="Find:").pack(side="left")
+        find_var = tk.StringVar()
+        find_entry = ttk.Entry(search, textvariable=find_var, width=28)
+        find_entry.pack(side="left", padx=(4, 6))
+        case_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(search, text="Match case", variable=case_var).pack(side="left")
+        count_lbl = ttk.Label(search, text="", foreground="#888")
+        count_lbl.pack(side="right")
+
         editor = tk.Text(win, wrap="none", bg="#101418", fg="#d6e2ee",
                          insertbackground="#d6e2ee", font=("Consolas", 10), undo=True)
         editor.pack(fill="both", expand=True, padx=8, pady=4)
         editor.insert("1.0", content)
+        editor.tag_configure("search_all", background="#3a3d41")
+        editor.tag_configure("search_cur", background="#d19a66", foreground="#101418")
+
+        matches = []        # start indices of every current match
+        cur = {"i": -1}
+
+        def do_search(*_):
+            editor.tag_remove("search_all", "1.0", "end")
+            editor.tag_remove("search_cur", "1.0", "end")
+            matches.clear()
+            cur["i"] = -1
+            term = find_var.get()
+            if not term:
+                count_lbl.config(text="")
+                return
+            nocase = not case_var.get()
+            idx = "1.0"
+            while True:
+                pos = editor.search(term, idx, stopindex="end", nocase=nocase)
+                if not pos:
+                    break
+                end = f"{pos}+{len(term)}c"
+                editor.tag_add("search_all", pos, end)
+                matches.append(pos)
+                idx = end
+            if matches:
+                goto(0)
+            else:
+                count_lbl.config(text="no matches")
+
+        def goto(i):
+            if not matches:
+                return
+            editor.tag_remove("search_cur", "1.0", "end")
+            cur["i"] = i % len(matches)
+            pos = matches[cur["i"]]
+            editor.tag_add("search_cur", pos, f"{pos}+{len(find_var.get())}c")
+            editor.see(pos)
+            count_lbl.config(text=f"{cur['i'] + 1} / {len(matches)}")
+
+        def next_match(*_):
+            if matches:
+                goto(cur["i"] + 1)
+            else:
+                do_search()
+            return "break"
+
+        def prev_match(*_):
+            if matches:
+                goto(cur["i"] - 1)
+            else:
+                do_search()
+            return "break"
+
+        find_var.trace_add("write", do_search)
+        case_var.trace_add("write", do_search)
+        find_entry.bind("<Return>", next_match)
+        find_entry.bind("<Shift-Return>", prev_match)
+        ttk.Button(search, text="▼ Next", command=next_match).pack(side="left", padx=2)
+        ttk.Button(search, text="▲ Prev", command=prev_match).pack(side="left", padx=2)
+        win.bind("<Control-f>", lambda e: (find_entry.focus_set(), find_entry.select_range(0, "end"), "break")[-1])
 
         bar = ttk.Frame(win)
         bar.pack(fill="x", padx=8, pady=(0, 8))
