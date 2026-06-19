@@ -3,6 +3,9 @@
 *.jks
 apk_tool_gui.config.json
 
+# --- Machine-specific tool paths (resolved per-machine at runtime) ---
+apk_tool_gui.tools.json
+
 # --- Build artifacts / test inputs ---
 *.apk
 *.apk.idsig

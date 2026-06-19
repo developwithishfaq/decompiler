@@ -18,6 +18,18 @@ without re-typing setup every day.
 - Rebuild → `zipalign` → `apksigner` sign → verify, in one click
 - Auto-detects `apktool`, `zipalign`, `apksigner` from PATH / Android build-tools
 
+**Generic, zero-config tool discovery**
+- Finds every external tool (`apktool`, `zipalign`, `apksigner`, `adb`,
+  `frida`/`frida-ps`) automatically — no machine-specific paths baked in
+- Looks in: saved overrides → system PATH → Android SDK (`build-tools`,
+  `platform-tools`, picked up from `ANDROID_HOME`/`ANDROID_SDK_ROOT` or the
+  standard Studio install on Windows/macOS/Linux) → common emulator installs
+  (Nox / BlueStacks / LDPlayer / MEmu / Genymotion)
+- If something can't be found, the app asks you to point it at the binary and
+  remembers your choice (`apk_tool_gui.tools.json`, git-ignored)
+- A **⚙ Tools** button (top-right) lets you view, edit, browse or re-detect
+  every tool path at any time
+
 **Frida / ADB**
 - ⚡ Quick start: connect → start `frida-server` → check, in one button
 - Robust `frida-server` start/kill/status (detects truncated process names)
@@ -60,8 +72,10 @@ On first run the app writes starter scripts into `scripts/` (git-ignored, regene
 - **Python 3** (uses stdlib `tkinter`)
 - `pip install -r requirements.txt` (installs `frida-tools`; pin `frida` to your
   device's `frida-server` version)
-- External tools on PATH (or Android SDK build-tools): `apktool`, `zipalign`,
-  `apksigner`, `adb`
+- External tools (`apktool`, `zipalign`, `apksigner`, `adb`) — installed
+  anywhere the app can discover them (PATH, Android SDK, or an emulator's bin
+  folder). If they're somewhere unusual, just point the **⚙ Tools** dialog at
+  them once.
 
 ## Run
 
@@ -73,6 +87,6 @@ or double-click **`APK Tool GUI.bat`** on Windows (launches with `pythonw`, no c
 
 ## Notes
 
-- Target environment during development was the Nox emulator (x86_64, Android 12),
-  adb at `127.0.0.1:62001`, but it works with any adb-reachable device/emulator.
+- The ADB device field defaults to `127.0.0.1:62001` (a common emulator port)
+  but works with any adb-reachable device/emulator — just edit the field.
 - `frida` on the PC must match the `frida-server` version on the device.

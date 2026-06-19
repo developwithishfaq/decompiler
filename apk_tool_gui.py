@@ -7,8 +7,11 @@ A simple Tkinter GUI for:
   * Recompiling a code folder back into an APK, then aligning,
     signing and verifying it.
 
-Tools used (apktool, zipalign, apksigner) are auto-detected from PATH,
-falling back to the latest Android SDK build-tools install.
+External tools (apktool, zipalign, apksigner, adb, frida) are discovered
+generically — saved overrides first, then PATH, then a standard Android SDK
+install, then common emulator install folders. Anything that can't be found is
+requested from the user via the "Tools" dialog and remembered between runs, so
+there are no machine-specific paths baked into the source.
 """
 
 import os
@@ -29,52 +32,123 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 # Remembers your field values between launches (so daily setup is zero-click)
 CONFIG_PATH = os.path.join(APP_DIR, "apk_tool_gui.config.json")
 
+# Remembers tool paths the user picked manually (so detection is one-time)
+TOOL_PATHS_PATH = os.path.join(APP_DIR, "apk_tool_gui.tools.json")
+
 # Folder where reusable Frida scripts live (managed by the Scripts tab)
 SCRIPTS_DIR = os.path.join(APP_DIR, "scripts")
 
-# Where Nox installs its adb (used as a fallback if adb isn't on PATH)
-NOX_BIN = r"D:\Program Files\Nox\bin"
-DEFAULT_ADB_HOST = "127.0.0.1:62001"          # Nox default adb port
+# A common emulator adb port (Nox); freely editable in the Frida/ADB tab.
+DEFAULT_ADB_HOST = "127.0.0.1:62001"
 DEFAULT_FRIDA_REMOTE = "/data/local/tmp/frida-server"
 
+# Stops child console apps (adb, apktool, frida-ps, ...) from flashing a cmd window.
+CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+
 # ---------------------------------------------------------------------------
-# Tool discovery
+# Generic tool discovery
+#
+# Nothing here is hard-coded to a particular machine. We look in, roughly:
+#   1. a path the user picked before (saved overrides)
+#   2. the system PATH
+#   3. a standard Android SDK install (build-tools / platform-tools)
+#   4. common Android-emulator install folders (Nox / BlueStacks / LDPlayer / …)
+# and only if all of that fails do we ask the user to point us at the binary.
 # ---------------------------------------------------------------------------
 
-def _build_tools_dirs():
-    """Return candidate Android SDK build-tools dirs, newest first."""
+def _home(*parts):
+    return os.path.join(os.path.expanduser("~"), *parts)
+
+
+def _dedup_existing_dirs(candidates):
+    seen, out = set(), []
+    for d in candidates:
+        if d and d not in seen and os.path.isdir(d):
+            seen.add(d)
+            out.append(d)
+    return out
+
+
+def _android_sdk_roots():
+    """Candidate Android SDK root dirs across OSes and env vars."""
     roots = []
+    for env in ("ANDROID_HOME", "ANDROID_SDK_ROOT", "ANDROID_SDK"):
+        v = os.environ.get(env)
+        if v:
+            roots.append(v)
     local = os.environ.get("LOCALAPPDATA")
     if local:
-        roots.append(os.path.join(local, "Android", "Sdk", "build-tools"))
-    if os.environ.get("ANDROID_HOME"):
-        roots.append(os.path.join(os.environ["ANDROID_HOME"], "build-tools"))
-    if os.environ.get("ANDROID_SDK_ROOT"):
-        roots.append(os.path.join(os.environ["ANDROID_SDK_ROOT"], "build-tools"))
+        roots.append(os.path.join(local, "Android", "Sdk"))
+    roots += [
+        _home("AppData", "Local", "Android", "Sdk"),  # Windows (Android Studio default)
+        _home("Library", "Android", "sdk"),           # macOS
+        _home("Android", "Sdk"),                       # Linux
+    ]
+    return _dedup_existing_dirs(roots)
 
+
+def _build_tools_dirs():
+    """Android SDK build-tools version dirs, newest first."""
     dirs = []
-    for root in roots:
-        if os.path.isdir(root):
-            for name in os.listdir(root):
-                full = os.path.join(root, name)
+    for root in _android_sdk_roots():
+        bt = os.path.join(root, "build-tools")
+        if os.path.isdir(bt):
+            for name in sorted(os.listdir(bt), reverse=True):
+                full = os.path.join(bt, name)
                 if os.path.isdir(full):
                     dirs.append(full)
-    # Sort by version-ish name, newest first
-    dirs.sort(reverse=True)
     return dirs
 
 
-def find_tool(names):
-    """Find an executable by trying PATH first, then build-tools dirs.
+def _platform_tools_dirs():
+    """Android SDK platform-tools dirs (where adb lives)."""
+    return _dedup_existing_dirs(
+        os.path.join(root, "platform-tools") for root in _android_sdk_roots()
+    )
 
-    `names` is a list of acceptable file names (e.g. zipalign.exe, zipalign).
-    Returns a usable command string, or None.
-    """
+
+def _emulator_dirs():
+    """Common Android-emulator install folders that ship their own adb."""
+    bases = []
+    for env in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "LOCALAPPDATA"):
+        v = os.environ.get(env)
+        if v:
+            bases.append(v)
+    # macOS / Linux installs (Genymotion, etc.)
+    bases += ["/Applications", _home("Applications")]
+
+    # Per-emulator sub-paths (relative to each base) where an adb binary sits.
+    subs = [
+        ("Nox", "bin"),
+        ("Nox", "Nox", "bin"),
+        ("BlueStacks_nxt",),
+        ("BlueStacks",),
+        ("LDPlayer", "LDPlayer9"),
+        ("LDPlayer", "LDPlayer4.0"),
+        ("LDPlayer9",),
+        ("LDPlayer",),
+        ("Microvirt", "MEmu"),
+        ("MEmu",),
+        ("Genymobile", "Genymotion", "tools"),
+        ("Genymotion.app", "Contents", "MacOS", "tools"),
+    ]
+    out = []
+    for base in bases:
+        for parts in subs:
+            out.append(os.path.join(base, *parts))
+    return _dedup_existing_dirs(out)
+
+
+def _which(names):
     for name in names:
         found = shutil.which(name)
         if found:
             return found
-    for d in _build_tools_dirs():
+    return None
+
+
+def _find_in_dirs(dirs, names):
+    for d in dirs:
         for name in names:
             cand = os.path.join(d, name)
             if os.path.isfile(cand):
@@ -82,30 +156,169 @@ def find_tool(names):
     return None
 
 
-def find_adb():
-    """Find adb: PATH first, then the Nox bin folder (adb.exe / nox_adb.exe)."""
-    for name in ("adb.exe", "adb"):
-        found = shutil.which(name)
-        if found:
-            return found
-    for name in ("adb.exe", "nox_adb.exe"):
-        cand = os.path.join(NOX_BIN, name)
-        if os.path.isfile(cand):
-            return cand
-    return None
+# -- per-tool finders --------------------------------------------------------
+
+def _find_apktool():
+    return (_which(["apktool.bat", "apktool", "apktool.jar"])
+            or _find_in_dirs([APP_DIR] + _build_tools_dirs(),
+                             ["apktool.bat", "apktool.jar", "apktool"]))
 
 
-APKTOOL = find_tool(["apktool.bat", "apktool", "apktool.jar"])
-ZIPALIGN = find_tool(["zipalign.exe", "zipalign"])
-APKSIGNER = find_tool(["apksigner.bat", "apksigner"])
-ADB = find_adb()
-FRIDA_PS = find_tool(["frida-ps.exe", "frida-ps"])
-FRIDA = find_tool(["frida.exe", "frida"])
+def _find_zipalign():
+    return (_which(["zipalign.exe", "zipalign"])
+            or _find_in_dirs(_build_tools_dirs(), ["zipalign.exe", "zipalign"]))
 
-DEFAULT_KEYSTORE = os.path.join(APP_DIR, "mmk.keystore")
 
-# Stops child console apps (adb, apktool, frida-ps, ...) from flashing a cmd window.
-CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+def _find_apksigner():
+    return (_which(["apksigner.bat", "apksigner"])
+            or _find_in_dirs(_build_tools_dirs(),
+                             ["apksigner.bat", "apksigner", "apksigner.jar"]))
+
+
+def _find_adb():
+    return (_which(["adb.exe", "adb"])
+            or _find_in_dirs(_platform_tools_dirs(), ["adb.exe", "adb"])
+            or _find_in_dirs(_emulator_dirs(), ["adb.exe", "nox_adb.exe", "adb"]))
+
+
+def _find_frida_ps():
+    return _which(["frida-ps.exe", "frida-ps"])
+
+
+def _find_frida():
+    return _which(["frida.exe", "frida"])
+
+
+class ToolSpec:
+    """Describes one external tool the app can use."""
+    def __init__(self, key, label, finder, required, hint):
+        self.key = key            # stable id used in config / code
+        self.label = label        # human-friendly name
+        self.finder = finder      # callable -> path or None
+        self.required = required  # block the relevant feature if missing
+        self.hint = hint          # shown in the picker when not found
+
+
+TOOL_SPECS = [
+    ToolSpec("apktool", "apktool", _find_apktool, True,
+             "Decompiles / recompiles APKs. Get it from https://apktool.org "
+             "(put apktool.bat + apktool.jar on PATH), then re-detect."),
+    ToolSpec("zipalign", "zipalign", _find_zipalign, True,
+             "Ships with the Android SDK build-tools. Install via Android "
+             "Studio or `sdkmanager \"build-tools;<ver>\"`."),
+    ToolSpec("apksigner", "apksigner", _find_apksigner, True,
+             "Ships with the Android SDK build-tools (apksigner.bat)."),
+    ToolSpec("adb", "adb", _find_adb, True,
+             "Android SDK platform-tools, or your emulator's bin folder "
+             "(Nox / BlueStacks / LDPlayer / MEmu / Genymotion)."),
+    ToolSpec("frida_ps", "frida-ps", _find_frida_ps, False,
+             "Optional (process listing). Install with: pip install frida-tools"),
+    ToolSpec("frida", "frida", _find_frida, False,
+             "Optional (script runner). Install with: pip install frida-tools"),
+]
+
+
+class ToolManager:
+    """Resolves, persists and exposes the paths of the external tools."""
+
+    def __init__(self):
+        self.specs = {s.key: s for s in TOOL_SPECS}
+        self.overrides = {}   # key -> user-picked path (persisted)
+        self.paths = {}       # key -> resolved path or None
+        self._load_overrides()
+
+    def _load_overrides(self):
+        try:
+            with open(TOOL_PATHS_PATH, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                self.overrides = {k: v for k, v in data.items()
+                                  if isinstance(v, str) and v}
+        except Exception:
+            self.overrides = {}
+
+    def _save_overrides(self):
+        try:
+            with open(TOOL_PATHS_PATH, "w", encoding="utf-8") as fh:
+                json.dump(self.overrides, fh, indent=2)
+        except Exception:
+            pass
+
+    def resolve(self, key):
+        """Resolve one tool: valid override first, else auto-detect."""
+        ov = self.overrides.get(key)
+        if ov and os.path.isfile(ov):
+            self.paths[key] = ov
+            return ov
+        if ov:  # saved path no longer exists -> forget it
+            self.overrides.pop(key, None)
+            self._save_overrides()
+        found = self.specs[key].finder()
+        self.paths[key] = found
+        return found
+
+    def resolve_all(self):
+        for key in self.specs:
+            self.resolve(key)
+        return self.paths
+
+    def get(self, key):
+        return self.paths.get(key)
+
+    def set_override(self, key, path):
+        """Pin a user-chosen path (empty string clears it back to auto-detect)."""
+        path = (path or "").strip()
+        if path:
+            self.overrides[key] = path
+        else:
+            self.overrides.pop(key, None)
+        self._save_overrides()
+        return self.resolve(key)
+
+    def missing_required(self):
+        return [self.specs[k] for k in self.specs
+                if self.specs[k].required and not self.paths.get(k)]
+
+    # convenience accessors used throughout the app
+    @property
+    def apktool(self):
+        return self.paths.get("apktool")
+
+    @property
+    def zipalign(self):
+        return self.paths.get("zipalign")
+
+    @property
+    def apksigner(self):
+        return self.paths.get("apksigner")
+
+    @property
+    def adb(self):
+        return self.paths.get("adb")
+
+    @property
+    def frida_ps(self):
+        return self.paths.get("frida_ps")
+
+    @property
+    def frida(self):
+        return self.paths.get("frida")
+
+
+TOOLS = ToolManager()
+TOOLS.resolve_all()
+
+
+def _default_keystore():
+    """Prefill the keystore field if a single .keystore/.jks sits next to the app."""
+    for pat in ("*.keystore", "*.jks"):
+        hits = sorted(glob.glob(os.path.join(APP_DIR, pat)))
+        if hits:
+            return hits[0]
+    return ""
+
+
+DEFAULT_KEYSTORE = _default_keystore()
 
 
 def list_scripts():
@@ -562,6 +775,8 @@ class App(tk.Tk):
             self._refresh_scripts()
         # Kick off an initial live-state check (non-blocking)
         self.after(400, self.refresh_state)
+        # If a required tool is missing, walk the user through locating it
+        self.after(600, self._prompt_missing_tools)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _on_close(self):
@@ -653,6 +868,7 @@ class App(tk.Tk):
         self.state_server.pack(side="left")
         ttk.Button(header, text="↻ Refresh", command=self.refresh_state).pack(side="right")
         ttk.Button(header, text="▶ Run last", command=self.run_last).pack(side="right", padx=6)
+        ttk.Button(header, text="⚙ Tools", command=self.open_tools_dialog).pack(side="right", padx=6)
 
         nb = ttk.Notebook(self)
         nb.pack(fill="x", padx=10, pady=(6, 0))
@@ -738,20 +954,20 @@ class App(tk.Tk):
         ttk.Button(f, text="Save as…", command=self._pick_out_rec).grid(row=1, column=2, padx=8)
 
         ttk.Label(f, text="Keystore:").grid(row=2, column=0, sticky="w", padx=8, pady=3)
-        self.rec_ks = tk.StringVar(value=DEFAULT_KEYSTORE if os.path.isfile(DEFAULT_KEYSTORE) else "")
+        self.rec_ks = tk.StringVar(value=DEFAULT_KEYSTORE)
         ttk.Entry(f, textvariable=self.rec_ks).grid(row=2, column=1, sticky="ew", pady=3)
         ttk.Button(f, text="Browse…", command=self._pick_ks_rec).grid(row=2, column=2, padx=8)
 
         ttk.Label(f, text="Keystore password:").grid(row=3, column=0, sticky="w", padx=8, pady=3)
-        self.rec_pass = tk.StringVar(value="123456")
+        self.rec_pass = tk.StringVar(value="")
         ttk.Entry(f, textvariable=self.rec_pass, show="•").grid(row=3, column=1, sticky="ew", pady=3)
 
         ttk.Label(f, text="Key alias:").grid(row=4, column=0, sticky="w", padx=8, pady=3)
-        self.rec_alias = tk.StringVar(value="mmk")
+        self.rec_alias = tk.StringVar(value="")
         ttk.Entry(f, textvariable=self.rec_alias).grid(row=4, column=1, sticky="ew", pady=3)
 
         ttk.Label(f, text="Key password:").grid(row=5, column=0, sticky="w", padx=8, pady=3)
-        self.rec_keypass = tk.StringVar(value="123456")
+        self.rec_keypass = tk.StringVar(value="")
         ttk.Entry(f, textvariable=self.rec_keypass, show="•").grid(row=5, column=1, sticky="ew", pady=3)
 
         ttk.Button(f, text="Build → Align → Sign → Verify",
@@ -1140,16 +1356,133 @@ class App(tk.Tk):
     def set_status(self, text):
         self.status.config(text=text)
 
+    # -- tool paths (generic discovery + manual override) --------------------
+    def _prompt_missing_tools(self):
+        """On startup, if a required tool wasn't found, offer to locate it."""
+        missing = TOOLS.missing_required()
+        if not missing:
+            return
+        names = ", ".join(s.label for s in missing)
+        if messagebox.askyesno(
+                "Set up tools",
+                f"These required tools were not found automatically:\n\n  {names}\n\n"
+                "Decompile / recompile / adb features need them.\n\n"
+                "Open the Tools dialog now to locate them?"):
+            self.open_tools_dialog()
+
+    def open_tools_dialog(self):
+        """Show / edit the resolved path of every external tool."""
+        win = tk.Toplevel(self)
+        win.title("Tool paths")
+        win.transient(self)
+        win.grab_set()
+        win.resizable(True, False)
+
+        intro = ttk.Label(
+            win, wraplength=620, justify="left",
+            text=("Paths are auto-detected from PATH, the Android SDK and common "
+                  "emulator installs. Override any of them below if detection is "
+                  "wrong or a tool lives somewhere unusual. Leave a field blank to "
+                  "fall back to auto-detection."))
+        intro.grid(row=0, column=0, columnspan=4, sticky="w", padx=10, pady=(10, 8))
+
+        vars_by_key = {}
+        status_by_key = {}
+        row = 1
+        for spec in TOOL_SPECS:
+            req = " *" if spec.required else ""
+            ttk.Label(win, text=f"{spec.label}{req}:").grid(
+                row=row, column=0, sticky="w", padx=(10, 4), pady=3)
+
+            var = tk.StringVar(value=TOOLS.get(spec.key) or "")
+            vars_by_key[spec.key] = var
+            entry = ttk.Entry(win, textvariable=var, width=64)
+            entry.grid(row=row, column=1, sticky="ew", pady=3)
+
+            ttk.Button(win, text="Browse…",
+                       command=lambda k=spec.key: self._browse_tool(k, vars_by_key)
+                       ).grid(row=row, column=2, padx=4)
+
+            st = ttk.Label(win, text="", width=12)
+            st.grid(row=row, column=3, padx=(4, 10), sticky="w")
+            status_by_key[spec.key] = st
+
+            ttk.Label(win, text=spec.hint, wraplength=600, foreground="#888",
+                      justify="left").grid(row=row + 1, column=1, columnspan=3,
+                                           sticky="w", pady=(0, 6))
+            row += 2
+
+        win.columnconfigure(1, weight=1)
+
+        def refresh_status():
+            for spec in TOOL_SPECS:
+                p = vars_by_key[spec.key].get().strip()
+                lbl = status_by_key[spec.key]
+                if p and os.path.isfile(p):
+                    lbl.config(text="● found", foreground="#3fb950")
+                elif p:
+                    lbl.config(text="● missing", foreground="#f85149")
+                elif spec.required:
+                    lbl.config(text="● not set", foreground="#f85149")
+                else:
+                    lbl.config(text="○ optional", foreground="#888")
+
+        def redetect_all():
+            # Clear overrides, re-run auto-detection, repopulate the fields.
+            for spec in TOOL_SPECS:
+                TOOLS.set_override(spec.key, "")
+            TOOLS.resolve_all()
+            for spec in TOOL_SPECS:
+                vars_by_key[spec.key].set(TOOLS.get(spec.key) or "")
+            refresh_status()
+
+        def save_and_close():
+            for spec in TOOL_SPECS:
+                val = vars_by_key[spec.key].get().strip()
+                # Only pin as an override when it differs from auto-detection;
+                # this keeps fields auto-updating when the SDK/emulator moves.
+                detected = spec.finder()
+                if val and val != (detected or ""):
+                    TOOLS.set_override(spec.key, val)
+                else:
+                    TOOLS.set_override(spec.key, "")
+            TOOLS.resolve_all()
+            win.destroy()
+            self._show_tool_status()
+            self.refresh_state()
+
+        for var in vars_by_key.values():
+            var.trace_add("write", lambda *a: refresh_status())
+        refresh_status()
+
+        btns = ttk.Frame(win)
+        btns.grid(row=row, column=0, columnspan=4, sticky="e", padx=10, pady=(8, 12))
+        ttk.Button(btns, text="Re-detect all", command=redetect_all).pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancel", command=win.destroy).pack(side="left", padx=4)
+        ttk.Button(btns, text="Save", command=save_and_close).pack(side="left", padx=4)
+
+    def _browse_tool(self, key, vars_by_key):
+        spec = TOOLS.specs[key]
+        path = filedialog.askopenfilename(
+            title=f"Locate {spec.label}",
+            initialdir=os.path.dirname(vars_by_key[key].get() or "") or APP_DIR)
+        if path:
+            vars_by_key[key].set(path)
+
     def _show_tool_status(self):
         self.write("=== APK Tool GUI ===\n")
-        self.write(f"apktool  : {APKTOOL or 'NOT FOUND'}\n")
-        self.write(f"zipalign : {ZIPALIGN or 'NOT FOUND'}\n")
-        self.write(f"apksigner: {APKSIGNER or 'NOT FOUND'}\n")
-        self.write(f"adb      : {ADB or 'NOT FOUND'}\n")
-        self.write(f"frida-ps : {FRIDA_PS or 'NOT FOUND (pip install frida-tools)'}\n")
-        if not (APKTOOL and ZIPALIGN and APKSIGNER):
-            self.write("[WARN] One or more tools were not found. "
-                       "Check your PATH / Android build-tools install.\n")
+        for spec in TOOL_SPECS:
+            path = TOOLS.get(spec.key)
+            if path:
+                self.write(f"{spec.label:<9}: {path}\n")
+            else:
+                tag = "NOT FOUND" if spec.required else "not found (optional)"
+                self.write(f"{spec.label:<9}: {tag}\n")
+        missing = TOOLS.missing_required()
+        if missing:
+            names = ", ".join(s.label for s in missing)
+            self.write(f"[WARN] Required tool(s) not found: {names}.\n"
+                       "       Click '⚙ Tools' to locate them.\n")
         self.write("\n")
 
     def _set_busy(self, busy):
@@ -1171,8 +1504,8 @@ class App(tk.Tk):
         if not name:
             messagebox.showerror("Error", "Please enter an output folder name.")
             return
-        if not APKTOOL:
-            messagebox.showerror("Error", "apktool was not found on PATH.")
+        if not TOOLS.apktool:
+            messagebox.showerror("Error", "apktool was not found. Click '⚙ Tools' to locate it.")
             return
 
         out = os.path.join(base, name)
@@ -1181,7 +1514,7 @@ class App(tk.Tk):
     def _do_decompile(self, apk, out):
         self._set_busy(True)
         r = Runner(self.log_queue)
-        cmd = [APKTOOL, "d"]
+        cmd = [TOOLS.apktool, "d"]
         if self.dec_force.get():
             cmd.append("-f")
         cmd += [apk, "-o", out]
@@ -1215,8 +1548,11 @@ class App(tk.Tk):
         if not ks or not os.path.isfile(ks):
             messagebox.showerror("Error", "Please select a valid keystore file.")
             return
-        if not (APKTOOL and ZIPALIGN and APKSIGNER):
-            messagebox.showerror("Error", "apktool / zipalign / apksigner not all found.")
+        if not (TOOLS.apktool and TOOLS.zipalign and TOOLS.apksigner):
+            messagebox.showerror(
+                "Error",
+                "apktool / zipalign / apksigner not all found.\n"
+                "Click '⚙ Tools' to locate the missing one(s).")
             return
 
         threading.Thread(target=self._do_recompile,
@@ -1235,7 +1571,7 @@ class App(tk.Tk):
         # 1) build
         self.set_status("Building APK…")
         self.write("\n--- STEP 1/4: apktool build ---\n")
-        if r.run([APKTOOL, "b", src, "-o", unsigned]) != 0:
+        if r.run([TOOLS.apktool, "b", src, "-o", unsigned]) != 0:
             self.write("\n✗ Build FAILED.\n"); self.set_status("Build failed"); self._set_busy(False); return
 
         # 2) zipalign
@@ -1243,13 +1579,13 @@ class App(tk.Tk):
         self.write("\n--- STEP 2/4: zipalign ---\n")
         if os.path.isfile(aligned):
             os.remove(aligned)
-        if r.run([ZIPALIGN, "-f", "-p", "4", unsigned, aligned]) != 0:
+        if r.run([TOOLS.zipalign, "-f", "-p", "4", unsigned, aligned]) != 0:
             self.write("\n✗ zipalign FAILED.\n"); self.set_status("Align failed"); self._set_busy(False); return
 
         # 3) sign
         self.set_status("Signing…")
         self.write("\n--- STEP 3/4: apksigner sign ---\n")
-        sign_cmd = [APKSIGNER, "sign",
+        sign_cmd = [TOOLS.apksigner, "sign",
                     "--ks", ks,
                     "--ks-pass", f"pass:{kspass}",
                     "--key-pass", f"pass:{keypass}"]
@@ -1262,7 +1598,7 @@ class App(tk.Tk):
         # 4) verify
         self.set_status("Verifying…")
         self.write("\n--- STEP 4/4: apksigner verify ---\n")
-        code = r.run([APKSIGNER, "verify", "--verbose", out])
+        code = r.run([TOOLS.apksigner, "verify", "--verbose", out])
         if code == 0:
             self.write(f"\n✔ DONE. Signed & verified APK:\n   {out}\n")
             self.set_status("Success — signed & verified")
@@ -1275,7 +1611,7 @@ class App(tk.Tk):
     def _adb(self, args):
         """Build an adb command list, applying the device serial from host field."""
         host = self.frida_host.get().strip()
-        cmd = [ADB]
+        cmd = [TOOLS.adb]
         if host:
             cmd += ["-s", host]
         return cmd + args
@@ -1320,9 +1656,12 @@ class App(tk.Tk):
         if self.busy:
             messagebox.showinfo("Busy", "A task is already running.")
             return False
-        if not ADB:
-            messagebox.showerror("Error",
-                                 f"adb was not found on PATH or in {NOX_BIN}.")
+        if not TOOLS.adb:
+            messagebox.showerror(
+                "Error",
+                "adb was not found.\n"
+                "Click '⚙ Tools' to locate it (Android platform-tools or your "
+                "emulator's bin folder).")
             return False
         return True
 
@@ -1337,8 +1676,8 @@ class App(tk.Tk):
         host = self.frida_host.get().strip()
         self.write("\n--- adb connect ---\n")
         if host:
-            r.run([ADB, "connect", host])
-        r.run([ADB, "devices"])
+            r.run([TOOLS.adb, "connect", host])
+        r.run([TOOLS.adb, "devices"])
         self.set_status("adb connect done")
         self._set_busy(False)
 
@@ -1355,7 +1694,7 @@ class App(tk.Tk):
 
         self.write("\n=== Starting frida-server ===\n")
         if host:
-            r.run([ADB, "connect", host])
+            r.run([TOOLS.adb, "connect", host])
 
         # already running?
         pids = self._frida_pids()
@@ -1452,9 +1791,9 @@ class App(tk.Tk):
 
         # 2) does the local frida client connect? (port 27042 must answer)
         client_ok = False
-        if FRIDA_PS:
+        if TOOLS.frida_ps:
             self.write("\n--- frida-ps -U ---\n")
-            client_ok = (r.run([FRIDA_PS, "-U"]) == 0)
+            client_ok = (r.run([TOOLS.frida_ps, "-U"]) == 0)
         else:
             self.write("\n[WARN] frida-ps not found on PATH. "
                        "Install it with: pip install frida-tools\n")
@@ -1490,8 +1829,8 @@ class App(tk.Tk):
 
     # -- target picker -------------------------------------------------------
     def load_targets(self):
-        if not ADB:
-            messagebox.showerror("Error", f"adb not found on PATH or in {NOX_BIN}.")
+        if not TOOLS.adb:
+            messagebox.showerror("Error", "adb not found. Click '⚙ Tools' to locate it.")
             return
         threading.Thread(target=self._do_load_targets, daemon=True).start()
 
@@ -1510,10 +1849,10 @@ class App(tk.Tk):
             self.write(f"Found {len(items)} third-party packages.\n")
         else:
             # running processes (for attach by name / pid)
-            if not FRIDA_PS:
+            if not TOOLS.frida_ps:
                 self.write("[WARN] frida-ps not found; cannot list running processes.\n")
                 return
-            rc, out = self._capture([FRIDA_PS, "-U"])
+            rc, out = self._capture([TOOLS.frida_ps, "-U"])
             for line in out.splitlines():
                 parts = line.split(None, 1)
                 if len(parts) == 2 and parts[0].isdigit():
@@ -1546,8 +1885,8 @@ class App(tk.Tk):
     def _do_refresh_state(self):
         host = self.frida_host.get().strip()
         connected = None
-        if ADB and host:
-            rc, out = self._capture([ADB, "-s", host, "get-state"])
+        if TOOLS.adb and host:
+            rc, out = self._capture([TOOLS.adb, "-s", host, "get-state"])
             connected = (out.strip() == "device")
         self.after(0, lambda: self._set_state(self.state_device, "Device", connected))
 
@@ -1665,14 +2004,14 @@ class App(tk.Tk):
 
     def _prefs_shell(self, inner):
         host = self.frida_host.get().strip()
-        base = [ADB] + (["-s", host] if host else [])
+        base = [TOOLS.adb] + (["-s", host] if host else [])
         if self.prefs_su.get():
             return base + ["shell", "su", "-c", inner]
         return base + ["shell", inner]
 
     def _prefs_guard(self):
-        if not ADB:
-            messagebox.showerror("Error", f"adb not found on PATH or in {NOX_BIN}.")
+        if not TOOLS.adb:
+            messagebox.showerror("Error", "adb not found. Click '⚙ Tools' to locate it.")
             return False
         if not self.prefs_pkg.get().strip():
             messagebox.showerror("Error", "Enter the app package name.")
@@ -1760,7 +2099,7 @@ class App(tk.Tk):
 
         r = Runner(self.log_queue)
         self.write(f"\n=== Saving {fn} to device ===\n")
-        push = [ADB] + (["-s", host] if host else []) + ["push", tf.name, remote_tmp]
+        push = [TOOLS.adb] + (["-s", host] if host else []) + ["push", tf.name, remote_tmp]
         if r.run(push) != 0:
             self.write("✗ push failed.\n")
             try:
@@ -1804,7 +2143,7 @@ class App(tk.Tk):
         if self.fs_proc is not None:
             messagebox.showinfo("Running", "A script is already running. Stop it first.")
             return
-        if not FRIDA:
+        if not TOOLS.frida:
             messagebox.showerror("Error", "frida CLI not found. Install: pip install frida-tools")
             return
         script = self.fs_script.get().strip()
@@ -1818,7 +2157,7 @@ class App(tk.Tk):
             messagebox.showerror("Error", "Please enter a target (package / process name / pid).")
             return
 
-        cmd = [FRIDA, "-U"]
+        cmd = [TOOLS.frida, "-U"]
         if mode == "spawn":
             cmd += ["-f", target]
         elif mode == "name":
