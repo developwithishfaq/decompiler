@@ -66,12 +66,22 @@ it).
 | `adb.default_host` | Prefilled ADB device (host:port) |
 | `adb.frida_remote` | Default on-device `frida-server` path |
 | `keystore.auto_detect_globs` | Patterns used to auto-fill the keystore field |
-| `tools.<tool>.names` | Executable filenames searched for each tool |
+| `tools.<tool>.path` | **Exact full path** to a tool's binary — set this to pin it explicitly (wins over everything); leave `""` to auto-detect |
+| `tools.<tool>.names` | Executable filenames searched for each tool when `path` is `""` |
 | `search_paths.android_sdk_roots` | Extra Android SDK roots to scan |
 | `search_paths.build_tools_dirs` | Extra dirs holding `zipalign` / `apksigner` |
 | `search_paths.platform_tools_dirs` | Extra dirs holding `adb` |
 | `search_paths.emulator_dirs` | Extra emulator bin folders |
 | `search_paths.extra_tool_dirs` | Generic extra dirs searched for every tool |
+
+**Example — pin adb to your emulator's binary.** In JSON, Windows paths need
+either forward slashes or escaped backslashes:
+
+```json
+"tools": {
+  "adb": { "path": "D:/Program Files/Nox/bin/adb.exe", "names": ["adb.exe", "nox_adb.exe", "adb"] }
+}
+```
 
 The app also keeps two **machine-specific, git-ignored** files it manages for
 you (no need to edit by hand):

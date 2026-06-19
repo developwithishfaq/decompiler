@@ -70,14 +70,19 @@ DEFAULT_SETTINGS = {
         # If exactly these patterns match a file next to the app, prefill it.
         "auto_detect_globs": ["*.keystore", "*.jks"],
     },
-    # The executable names to look for on PATH / in the search dirs, per tool.
+    # Per tool:
+    #   "path"  - the exact full path to the binary. Set this to pin a tool
+    #             explicitly (e.g. "D:/Program Files/Nox/bin/adb.exe"); leave
+    #             "" to auto-detect. An explicit path always wins.
+    #   "names" - the executable filenames to look for on PATH / search dirs
+    #             when "path" is empty.
     "tools": {
-        "apktool":   {"names": ["apktool.bat", "apktool", "apktool.jar"]},
-        "zipalign":  {"names": ["zipalign.exe", "zipalign"]},
-        "apksigner": {"names": ["apksigner.bat", "apksigner", "apksigner.jar"]},
-        "adb":       {"names": ["adb.exe", "nox_adb.exe", "adb"]},
-        "frida_ps":  {"names": ["frida-ps.exe", "frida-ps"]},
-        "frida":     {"names": ["frida.exe", "frida"]},
+        "apktool":   {"path": "", "names": ["apktool.bat", "apktool", "apktool.jar"]},
+        "zipalign":  {"path": "", "names": ["zipalign.exe", "zipalign"]},
+        "apksigner": {"path": "", "names": ["apksigner.bat", "apksigner", "apksigner.jar"]},
+        "adb":       {"path": "", "names": ["adb.exe", "nox_adb.exe", "adb"]},
+        "frida_ps":  {"path": "", "names": ["frida-ps.exe", "frida-ps"]},
+        "frida":     {"path": "", "names": ["frida.exe", "frida"]},
     },
     # Extra folders to search, on top of the ones auto-detected from the
     # Android SDK / common emulator installs. Add absolute paths here if your
@@ -341,7 +346,16 @@ class ToolManager:
             pass
 
     def resolve(self, key):
-        """Resolve one tool: valid override first, else auto-detect."""
+        """Resolve one tool, most explicit source first:
+        1. an exact "path" pinned in settings.json
+        2. a path picked earlier via the ⚙ Tools dialog (apk_tool_gui.tools.json)
+        3. auto-detection (PATH / Android SDK / emulator installs)
+        """
+        sp = (SETTINGS["tools"].get(key, {}).get("path") or "").strip()
+        if sp and os.path.isfile(sp):
+            self.paths[key] = sp
+            return sp
+
         ov = self.overrides.get(key)
         if ov and os.path.isfile(ov):
             self.paths[key] = ov
@@ -349,6 +363,7 @@ class ToolManager:
         if ov:  # saved path no longer exists -> forget it
             self.overrides.pop(key, None)
             self._save_overrides()
+
         found = self.specs[key].finder()
         self.paths[key] = found
         return found

@@ -13,12 +13,12 @@
     "auto_detect_globs": ["*.keystore", "*.jks"]
   },
   "tools": {
-    "apktool":   { "names": ["apktool.bat", "apktool", "apktool.jar"] },
-    "zipalign":  { "names": ["zipalign.exe", "zipalign"] },
-    "apksigner": { "names": ["apksigner.bat", "apksigner", "apksigner.jar"] },
-    "adb":       { "names": ["adb.exe", "nox_adb.exe", "adb"] },
-    "frida_ps":  { "names": ["frida-ps.exe", "frida-ps"] },
-    "frida":     { "names": ["frida.exe", "frida"] }
+    "apktool":   { "path": "", "names": ["apktool.bat", "apktool", "apktool.jar"] },
+    "zipalign":  { "path": "", "names": ["zipalign.exe", "zipalign"] },
+    "apksigner": { "path": "", "names": ["apksigner.bat", "apksigner", "apksigner.jar"] },
+    "adb":       { "path": "", "names": ["adb.exe", "nox_adb.exe", "adb"] },
+    "frida_ps":  { "path": "", "names": ["frida-ps.exe", "frida-ps"] },
+    "frida":     { "path": "", "names": ["frida.exe", "frida"] }
   },
   "search_paths": {
     "android_sdk_roots": [],
