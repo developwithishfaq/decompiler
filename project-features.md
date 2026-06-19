@@ -48,7 +48,9 @@ instrumentation session.
 
 ### Prefs
 Inspect and edit SharedPreferences XML files on the connected device over
-ADB (no Frida required). Supports root-via-su for protected app data.
+ADB (no Frida required). Includes a package picker (filter + 3rd-party-only +
+refresh, like the Pull APK screen) so you can click an installed app instead of
+typing its package name. Supports root-via-su for protected app data.
 → See [`prefs_screen.md`](prefs_screen.md)
 
 ### Pull APK
