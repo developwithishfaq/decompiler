@@ -2270,6 +2270,7 @@ class App(tk.Tk):
         r.run([TOOLS.adb, "devices"])
         self.set_status("adb connect done")
         self._set_busy(False)
+        self.refresh_state()   # updates the status bar with device name / Android / ABIs
 
     def frida_start(self):
         if not self._frida_guard():
@@ -2472,6 +2473,33 @@ class App(tk.Tk):
         else:
             label.config(text=f"{name}: ● ?", foreground="#888")
 
+    def _device_summary(self):
+        """One-line description of the connected device: name, Android, ABIs.
+
+        Returns "" if it can't be read. Uses a single adb shell round-trip that
+        runs `getprop` for each key in order, so the values line up by index.
+        """
+        keys = ["ro.product.manufacturer", "ro.product.model",
+                "ro.build.version.release", "ro.build.version.sdk",
+                "ro.product.cpu.abilist"]
+        inner = " ; ".join(f"getprop {k}" for k in keys)
+        rc, out = self._capture(self._adb(["shell", inner]))
+        if rc != 0:
+            return ""
+        vals = [ln.strip() for ln in out.splitlines()]
+        vals += [""] * (len(keys) - len(vals))   # pad if a trailing prop was empty
+        mfr, model, rel, sdk, abis = vals[:5]
+        name = f"{mfr} {model}".strip() or "device"
+        parts = [name]
+        if rel or sdk:
+            ver = f"Android {rel or '?'}"
+            if sdk:
+                ver += f" (API {sdk})"
+            parts.append(ver)
+        if abis:
+            parts.append(abis)
+        return "   ·   ".join(parts)
+
     def _do_refresh_state(self):
         host = self.frida_host.get().strip()
         connected = None
@@ -2479,6 +2507,13 @@ class App(tk.Tk):
             rc, out = self._capture([TOOLS.adb, "-s", host, "get-state"])
             connected = (out.strip() == "device")
         self.after(0, lambda: self._set_state(self.state_device, "Device", connected))
+
+        if connected:
+            summary = self._device_summary()
+            if summary:
+                self.after(0, lambda s=summary: self.set_status(s))
+        elif connected is False:
+            self.after(0, lambda: self.set_status("No device connected"))
 
         running = None
         if connected:
