@@ -1277,6 +1277,10 @@ class App(tk.Tk):
         ttk.Button(header, text="▶ Run last", command=self.run_last).pack(side="right", padx=6)
         ttk.Button(header, text="⚙ Tools", command=self.open_tools_dialog).pack(side="right", padx=6)
 
+        # Device details (name / Android version / supported ABIs), filled on refresh
+        self.devinfo = ttk.Label(self, text="", foreground="#7aa2cc", anchor="w")
+        self.devinfo.pack(fill="x", padx=10, pady=(2, 0))
+
         nb = ttk.Notebook(self)
         nb.pack(fill="x", padx=10, pady=(6, 0))
 
@@ -2506,11 +2510,13 @@ class App(tk.Tk):
         self.after(0, lambda: self._set_state(self.state_device, "Device", connected))
 
         if connected:
-            summary = self._device_summary()
-            if summary:
-                self.after(0, lambda s=summary: self.set_status(s))
+            summary = self._device_summary() or "Device connected (couldn't read properties)"
+            self.after(0, lambda s=summary: self.devinfo.config(text=s, foreground="#7aa2cc"))
         elif connected is False:
-            self.after(0, lambda: self.set_status("No device connected"))
+            self.after(0, lambda: self.devinfo.config(text="No device connected",
+                                                      foreground="#888"))
+        else:
+            self.after(0, lambda: self.devinfo.config(text=""))
 
         running = None
         if connected:

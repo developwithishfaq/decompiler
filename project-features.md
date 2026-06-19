@@ -30,8 +30,8 @@ apktool → zipalign → apksigner in a single click.
 ### Frida / ADB
 Connect to an ADB device, start / stop the on-device frida-server, and
 verify the Frida connection. A "Quick start" button runs the entire daily
-ritual (connect → start → check) in one click. When a device is connected, the
-bottom status bar shows its name, Android version, and supported ABIs.
+ritual (connect → start → check) in one click. When a device is connected, a
+line in the status header shows its name, Android version, and supported ABIs.
 → See [`frida_adb_screen.md`](frida_adb_screen.md)
 
 ### Scripts

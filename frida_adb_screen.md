@@ -21,13 +21,14 @@ lifecycle (start / stop / check), and verify the Frida client-server connection.
 The global status strip at the top of the window shows live device and
 frida-server state (green / red / grey). Click **↻ Refresh** to re-query.
 
-## Status bar device info
-Whenever a device is connected (on **Connect**, **↻ Refresh**, or after a
-frida-server start/kill), the bottom **status bar** shows a one-line summary of
-the device, read via `adb shell getprop`:
+## Device info line
+Just below the status dots in the header, a one-line summary of the connected
+device is shown (read via `adb shell getprop`). It refreshes whenever the state
+is re-queried — on **Connect**, **↻ Refresh**, or after a frida-server
+start/kill:
 
 ```
-Samsung SM-G991B   ·   Android 13 (API 33)   ·   arm64-v8a,armeabi-v7a
+samsung SM-G988N   ·   Android 12 (API 32)   ·   x86_64,arm64-v8a,x86,armeabi-v7a,armeabi
 ```
 
 - **Name** — manufacturer + model (`ro.product.manufacturer` + `ro.product.model`)
@@ -36,7 +37,7 @@ Samsung SM-G991B   ·   Android 13 (API 33)   ·   arm64-v8a,armeabi-v7a
 - **Architecture** — the ABIs the device supports (`ro.product.cpu.abilist`),
   which tells you which `split_config.<abi>.apk` / `lib/<abi>/*.so` you need.
 
-When no device is connected the status bar reads **No device connected**.
+When no device is connected the line reads **No device connected**.
 
 ## Requirements
 adb must be found. frida-ps is optional (needed for Check and target loading).
