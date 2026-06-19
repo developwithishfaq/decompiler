@@ -9,7 +9,7 @@ test values, or understanding what an app persists.
 
 | Control | Description |
 |---|---|
-| **Package** | App package name (e.g. `com.example.app`). "Use Frida target" copies the current Frida Script target in one click. Picking a package from the list below also fills this field. |
+| **Package** | App package name (e.g. `com.example.app`). Picking a package from the list below fills this field. |
 | **Use root via su** | Wrap shell commands in `su -c` — required for most apps whose data is owned by their own UID. |
 | **Filter** | Live search over the package list. Narrows the list as you type. |
 | **3rd-party only** | When checked, `pm list packages -3` is used so system apps are excluded. |
@@ -34,6 +34,16 @@ the [Pull APK](pull_apk_screen.md) screen.
    `cat > <target>` to preserve the file's owner and permissions.
 4. Restart the app after saving — Android caches prefs in memory and won't see
    changes until the next cold start.
+
+## Searching inside a file
+The editor window has a **Find** bar at the top for searching the open file:
+
+- Type in **Find** to highlight every match live as you type.
+- **▼ Next** / **▲ Prev** (or **Enter** / **Shift+Enter** in the Find box) step
+  through matches; the current one is highlighted and scrolled into view.
+- **Match case** toggles case-sensitive search (off by default).
+- The counter on the right shows `current / total` (or "no matches").
+- **Ctrl+F** jumps focus to the Find box from anywhere in the editor.
 
 ## Persistence
 The **3rd-party only** toggle (and the last-used **Package**) are saved between
